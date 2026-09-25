@@ -41,11 +41,11 @@ cmake --build build-external-osx --target sommacampagna_receiver_au_AU
 Verify that each executable contains both slices:
 
 ```bash
-lipo -verify_arch arm64 x86_64 build-external-osx/sommacampagna_engine_artefacts/Release/sommacampagna_engine.app/Contents/MacOS/sommacampagna_engine
-lipo -verify_arch arm64 x86_64 build-external-osx/sommacampagna_sender_artefacts/Release/VST3/sommacampagna_sender.vst3/Contents/MacOS/sommacampagna_sender
-lipo -verify_arch arm64 x86_64 build-external-osx/sommacampagna_sender_au_artefacts/Release/AU/sommacampagna_sender.component/Contents/MacOS/sommacampagna_sender
-lipo -verify_arch arm64 x86_64 build-external-osx/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3/Contents/MacOS/sommacampagna_receiver
-lipo -verify_arch arm64 x86_64 build-external-osx/sommacampagna_receiver_au_artefacts/Release/AU/sommacampagna_receiver.component/Contents/MacOS/sommacampagna_receiver
+lipo build-external-osx/sommacampagna_engine_artefacts/Release/sommacampagna_engine.app/Contents/MacOS/sommacampagna_engine -verify_arch arm64 x86_64
+lipo build-external-osx/sommacampagna_sender_artefacts/Release/VST3/sommacampagna_sender.vst3/Contents/MacOS/sommacampagna_sender -verify_arch arm64 x86_64
+lipo build-external-osx/sommacampagna_sender_au_artefacts/Release/AU/sommacampagna_sender.component/Contents/MacOS/sommacampagna_sender -verify_arch arm64 x86_64
+lipo build-external-osx/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3/Contents/MacOS/sommacampagna_receiver -verify_arch arm64 x86_64
+lipo build-external-osx/sommacampagna_receiver_au_artefacts/Release/AU/sommacampagna_receiver.component/Contents/MacOS/sommacampagna_receiver -verify_arch arm64 x86_64
 ```
 
 ## Artifacts
