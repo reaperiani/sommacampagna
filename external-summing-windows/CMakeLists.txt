@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 
+if(APPLE)
+  set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures")
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
+endif()
+
 project(SommacampagnaExternalSumming VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -12,6 +17,7 @@ endif()
 add_subdirectory(${JUCE_DIR} JUCE)
 
 juce_add_gui_app(sommacampagna_engine
+  BUNDLE_ID "com.reaperiani.sommacampagna.engine"
   PRODUCT_NAME "sommacampagna_engine"
 )
 
@@ -40,6 +46,7 @@ target_compile_definitions(sommacampagna_engine PUBLIC
 
 juce_add_plugin(sommacampagna_sender
   COMPANY_NAME "reaperiani"
+  BUNDLE_ID "com.reaperiani.sommacampagna.sender"
   IS_SYNTH FALSE
   NEEDS_MIDI_INPUT FALSE
   NEEDS_MIDI_OUTPUT FALSE
@@ -75,6 +82,7 @@ target_link_libraries(sommacampagna_sender PRIVATE
 
 juce_add_plugin(sommacampagna_receiver
   COMPANY_NAME "reaperiani"
+  BUNDLE_ID "com.reaperiani.sommacampagna.receiver"
   IS_SYNTH FALSE
   NEEDS_MIDI_INPUT FALSE
   NEEDS_MIDI_OUTPUT FALSE
@@ -107,3 +115,75 @@ target_compile_definitions(sommacampagna_receiver PUBLIC
 target_link_libraries(sommacampagna_receiver PRIVATE
   juce::juce_audio_utils
 )
+
+if(APPLE)
+  juce_add_plugin(sommacampagna_sender_au
+    COMPANY_NAME "reaperiani"
+    BUNDLE_ID "com.reaperiani.sommacampagna.sender.au"
+    IS_SYNTH FALSE
+    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_OUTPUT FALSE
+    IS_MIDI_EFFECT FALSE
+    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    COPY_PLUGIN_AFTER_BUILD FALSE
+    PLUGIN_MANUFACTURER_CODE Reap
+    PLUGIN_CODE Ssnd
+    FORMATS AU
+    PRODUCT_NAME "sommacampagna_sender"
+  )
+
+  target_sources(sommacampagna_sender_au PRIVATE
+    sender/PluginProcessor.h
+    sender/PluginProcessor.cpp
+    sender/PluginEditor.h
+    sender/PluginEditor.cpp
+  )
+
+  target_include_directories(sommacampagna_sender_au PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/shared
+  )
+
+  target_compile_definitions(sommacampagna_sender_au PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+  )
+
+  target_link_libraries(sommacampagna_sender_au PRIVATE
+    juce::juce_audio_utils
+  )
+
+  juce_add_plugin(sommacampagna_receiver_au
+    COMPANY_NAME "reaperiani"
+    BUNDLE_ID "com.reaperiani.sommacampagna.receiver.au"
+    IS_SYNTH FALSE
+    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_OUTPUT FALSE
+    IS_MIDI_EFFECT FALSE
+    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    COPY_PLUGIN_AFTER_BUILD FALSE
+    PLUGIN_MANUFACTURER_CODE Reap
+    PLUGIN_CODE Rrcv
+    FORMATS AU
+    PRODUCT_NAME "sommacampagna_receiver"
+  )
+
+  target_sources(sommacampagna_receiver_au PRIVATE
+    receiver/PluginProcessor.h
+    receiver/PluginProcessor.cpp
+    receiver/PluginEditor.h
+    receiver/PluginEditor.cpp
+  )
+
+  target_include_directories(sommacampagna_receiver_au PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/shared
+  )
+
+  target_compile_definitions(sommacampagna_receiver_au PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+  )
+
+  target_link_libraries(sommacampagna_receiver_au PRIVATE
+    juce::juce_audio_utils
+  )
+endif()

@@ -1,6 +1,17 @@
-# sommacampagna (VST3)
+# sommacampagna
 
-Headless JUCE VST3 prototype derived from the JSFX summing DSP concept.
+JUCE/CMake audio summing experiments, including a multichannel plugin and an
+external engine with sender/receiver plugins.
+
+[![External Summing Builds](https://github.com/reaperiani/sommacampagna/actions/workflows/external-summing-build.yml/badge.svg)](https://github.com/reaperiani/sommacampagna/actions/workflows/external-summing-build.yml)
+
+## Inspiration
+
+This project is inspired by the ideas and discussion around
+[The Analog Molecule - 3D Console Network](https://forum.cockos.com/showthread.php?t=305604),
+created and shared on the Cockos forum by Punchipum / DocShadrach. Sommacampagna
+is a separate implementation and is not presented as an official version of, or
+replacement for, The Analog Molecule.
 
 Current status:
 - 16 input channels (8 stereo stems) -> stereo output
@@ -13,6 +24,11 @@ Current status:
   - Gravity (%)
   - Summing Bypass
 - BUS STRESS (RAIL SAG) exposed as parameter meter
+
+The cross-platform external-engine implementation lives in
+[`external-summing-windows/`](external-summing-windows/README.md). The folder
+name is historical; its CI builds Windows VST3 products and Universal macOS
+VST3/AU products.
 
 ## Build (Windows)
 

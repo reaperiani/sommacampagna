@@ -1,7 +1,12 @@
 #pragma once
 
+#include <array>
+#include <atomic>
+
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Protocol.h"
+
+class SenderNetworkThread;
 
 class SenderAudioProcessor final : public juce::AudioProcessor
 {
@@ -35,13 +40,25 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
 private:
-    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() const;
+    friend class SenderNetworkThread;
 
-    std::unique_ptr<juce::DatagramSocket> socket;
+    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() const;
+    void startNetworkThread();
+    void stopNetworkThread();
+    somma::StereoAudioPacket* beginPacket() noexcept;
+    void commitPacket() noexcept;
+    bool popPacket(somma::StereoAudioPacket& packet) noexcept;
+
+    static constexpr uint32_t packetQueueCapacity = 64;
+    static_assert(std::atomic<uint32_t>::is_always_lock_free);
+
+    std::array<somma::StereoAudioPacket, packetQueueCapacity> packetQueue {};
+    alignas(64) std::atomic<uint32_t> packetWritePosition { 0 };
+    alignas(64) std::atomic<uint32_t> packetReadPosition { 0 };
+    std::unique_ptr<SenderNetworkThread> networkThread;
     uint32_t streamId = 0;
     uint32_t blockIndex = 0;
-    uint16_t targetEnginePort = somma::senderToEnginePort;
-    uint32_t lastPortPollMs = 0;
+    uint32_t currentSampleRate = 48000;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SenderAudioProcessor)
 };

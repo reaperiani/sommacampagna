@@ -22,6 +22,9 @@
   `cmake --build build-external --config Release --target sommacampagna_engine`
   `cmake --build build-external --config Release --target sommacampagna_sender_VST3`
   `cmake --build build-external --config Release --target sommacampagna_receiver_VST3`
+- External summing Universal macOS build:
+  `JUCE_DIR="/path/to/JUCE-8.0.12" ./buildpack/build-external-macos.sh`
+  This builds the engine plus sender/receiver VST3 and AU products for `arm64;x86_64`.
 
 ## Verification
 

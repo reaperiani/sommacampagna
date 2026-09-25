@@ -1,15 +1,24 @@
-# sommacampagna external summing (Windows MVP)
+# sommacampagna external summing
 
-This is a new, isolated project folder that leaves the original multichannel VST3 project untouched.
+This isolated project contains an external summing engine plus sender and
+receiver plugins. It leaves the original multichannel plugin untouched.
+
+## Inspiration
+
+The external summing architecture is inspired by the shared-console concepts
+discussed in [The Analog Molecule - 3D Console Network](https://forum.cockos.com/showthread.php?t=305604),
+created and shared on the Cockos forum by Punchipum / DocShadrach. This project
+is a separate implementation and is not presented as an official version of, or
+replacement for, The Analog Molecule.
 
 ## What is included
 
 - `sommacampagna_engine.exe`: external localhost UDP summing engine
-- `sommacampagna_sender.vst3`: sender plugin
+- `sommacampagna_sender`: sender plugin (VST3 on Windows/macOS, AU on macOS)
   - stereo send
   - target pair selector (`Pair 1..8`)
   - pre-send gain (`-60 dB .. +12 dB`)
-- `sommacampagna_receiver.vst3`: receiver plugin
+- `sommacampagna_receiver`: receiver plugin (VST3 on Windows/macOS, AU on macOS)
   - returns main stereo sum from engine by default
   - output trim
   - connection status in UI
@@ -17,14 +26,16 @@ This is a new, isolated project folder that leaves the original multichannel VST
 ## Important MVP notes
 
 - Transport is localhost UDP only (`127.0.0.1`).
-- This is a functional MVP skeleton.
-- Engine currently forwards the latest sender block to main sum output.
-  - Next iteration should accumulate multiple concurrent sender streams by `sessionId` + `pairIndex`.
+- The engine accumulates concurrent sender streams and processes their stereo sum.
+- Sender and receiver networking runs on dedicated worker threads rather than DAW audio callbacks.
+- Real-time playback is supported; faster-than-real-time/offline bounce is not yet guaranteed.
+- UDP packet loss, reordering, and clock drift are not yet corrected.
 
 ## Ports
 
-- Sender -> Engine: `45570`
-- Engine -> Receiver: `45571`
+- Sender -> Engine default: `45570`
+- Engine -> Receiver default: `45571`
+- If a default port is occupied, the engine publishes the selected runtime ports through the shared discovery file.
 
 ## Build (Windows)
 
@@ -34,6 +45,8 @@ cmake --build build-external --config Release --target sommacampagna_engine
 cmake --build build-external --config Release --target sommacampagna_sender_VST3
 cmake --build build-external --config Release --target sommacampagna_receiver_VST3
 ```
+
+For Universal macOS VST3/AU builds, see [`BUILD-OSX.md`](BUILD-OSX.md).
 
 ## Quick run
 

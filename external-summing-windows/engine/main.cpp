@@ -2,7 +2,6 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <unordered_map>
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -17,9 +16,13 @@ constexpr int numPairs = 8;
 constexpr int numInputChannels = 16;
 constexpr uint16_t fixedEngineBlockSamples = 512;
 constexpr uint32_t streamTimeoutMs = 1200;
+constexpr size_t maxActiveStreams = 128;
+constexpr int maxReceiveDatagramsPerIteration = 64;
 
 struct StreamState
 {
+    bool active = false;
+    uint32_t streamId = 0;
     uint16_t pairIndex = 0;
     uint16_t numSamples = 0;
     uint32_t sampleRate = 48000;
@@ -31,6 +34,16 @@ struct StreamState
     size_t readPos = 0;
     size_t availableFrames = 0;
     bool playbackPrimed = false;
+
+    void reset() noexcept
+    {
+        active = false;
+        streamId = 0;
+        writePos = 0;
+        readPos = 0;
+        availableFrames = 0;
+        playbackPrimed = false;
+    }
 
     void pushFrame(float l, float r) noexcept
     {
@@ -104,55 +117,82 @@ public:
 
         juce::DatagramSocket outSocket;
         const auto selectedOutPort = findAvailablePortByProbe(somma::engineToReceiverPort);
-        somma::writePorts({ selectedInPort, selectedOutPort, shared.transmissionBufferMs.load(std::memory_order_relaxed) });
+        bool configPublished = somma::writePorts({ selectedInPort, selectedOutPort, shared.transmissionBufferMs.load(std::memory_order_relaxed) });
 
-        std::unordered_map<uint32_t, StreamState> streams;
         std::array<std::array<float, somma::maxSamplesPerPacket>, numInputChannels> mixInputs {};
         std::array<float*, numInputChannels> mixPtrs {};
         std::array<float, somma::maxSamplesPerPacket> outL {};
         std::array<float, somma::maxSamplesPerPacket> outR {};
+        std::array<char, somma::maximumInspectedDatagramSize> datagram;
+        somma::StereoAudioPacket packet;
+        somma::StereoAudioPacket outPacket;
 
         HotSummerDSP dsp;
         HotSummerParams params;
         uint32_t sampleRate = 48000;
+        bool sampleRateLocked = false;
         dsp.prepare(static_cast<double>(sampleRate));
 
         uint32_t outBlock = 0;
         uint32_t sessionId = 1;
         auto nextSend = juce::Time::getMillisecondCounterHiRes();
-        uint32_t lastConfigWriteMs = 0;
+        uint32_t lastConfigWriteMs = nowMs();
+        float lastPublishedBufferMs = shared.transmissionBufferMs.load(std::memory_order_relaxed);
 
         while (!threadShouldExit())
         {
-            for (;;)
+            for (int datagramIndex = 0; datagramIndex < maxReceiveDatagramsPerIteration; ++datagramIndex)
             {
-                somma::StereoAudioPacket p {};
-                const int bytes = inSocket.read(reinterpret_cast<char*>(&p), sizeof(p), false);
-                if (bytes < static_cast<int>(sizeof(somma::PacketHeader)))
+                const int bytes = inSocket.read(datagram.data(), static_cast<int>(datagram.size()), false);
+                if (bytes <= 0)
                     break;
 
-                if (!somma::isValidHeader(p.header)
-                    || p.header.packetType != static_cast<uint16_t>(somma::PacketType::senderAudio))
+                if (!somma::decodeStereoAudioPacket(datagram.data(),
+                                                    static_cast<size_t>(bytes),
+                                                    somma::PacketType::senderAudio,
+                                                    packet))
                     continue;
 
-                auto& st = streams[p.header.streamId];
-                st.pairIndex = static_cast<uint16_t>(p.header.pairIndex % numPairs);
-                st.numSamples = p.header.numSamples;
-                st.sampleRate = p.header.sampleRate;
-                st.sessionId = p.header.sessionId;
-                st.lastSeenMs = nowMs();
-                for (int i = 0; i < static_cast<int>(p.header.numSamples); ++i)
-                    st.pushFrame(p.interleaved[static_cast<size_t>(i * 2)], p.interleaved[static_cast<size_t>(i * 2 + 1)]);
+                if (sampleRateLocked && packet.header.sampleRate != sampleRate)
+                    continue;
 
-                sessionId = p.header.sessionId;
-                sampleRate = p.header.sampleRate > 0 ? p.header.sampleRate : sampleRate;
+                if (!sampleRateLocked)
+                {
+                    sampleRate = packet.header.sampleRate;
+                    sessionId = packet.header.sessionId;
+                    dsp.prepare(static_cast<double>(sampleRate));
+                    sampleRateLocked = true;
+                    nextSend = juce::Time::getMillisecondCounterHiRes();
+                }
+
+                if (packet.header.sessionId != sessionId)
+                    continue;
+
+                auto* stream = findStream(packet.header.streamId);
+                if (stream == nullptr)
+                    stream = allocateStream(packet.header.streamId, nowMs());
+                if (stream == nullptr)
+                    continue;
+
+                auto& st = *stream;
+                st.pairIndex = packet.header.pairIndex;
+                st.numSamples = packet.header.numSamples;
+                st.sampleRate = packet.header.sampleRate;
+                st.sessionId = packet.header.sessionId;
+                st.lastSeenMs = nowMs();
+                for (int i = 0; i < static_cast<int>(packet.header.numSamples); ++i)
+                    st.pushFrame(packet.interleaved[static_cast<size_t>(i * 2)], packet.interleaved[static_cast<size_t>(i * 2 + 1)]);
             }
 
             const uint32_t configNow = nowMs();
-            if ((configNow - lastConfigWriteMs) > 500u)
+            const float currentBufferMs = shared.transmissionBufferMs.load(std::memory_order_relaxed);
+            if ((!configPublished || currentBufferMs != lastPublishedBufferMs)
+                && (configNow - lastConfigWriteMs) > 500u)
             {
-                somma::writePorts({ selectedInPort, selectedOutPort, shared.transmissionBufferMs.load(std::memory_order_relaxed) });
+                configPublished = somma::writePorts({ selectedInPort, selectedOutPort, currentBufferMs });
                 lastConfigWriteMs = configNow;
+                if (configPublished)
+                    lastPublishedBufferMs = currentBufferMs;
             }
 
             params.consoleFlavor = shared.consoleFlavor.load(std::memory_order_relaxed);
@@ -167,15 +207,19 @@ public:
 
             const uint32_t t = nowMs();
             const auto targetBufferFrames = getTargetBufferFrames(shared.transmissionBufferMs.load(std::memory_order_relaxed), sampleRate);
-            for (auto it = streams.begin(); it != streams.end();)
+            size_t activeStreamCount = 0;
+            for (auto& st : streams)
             {
-                if ((t - it->second.lastSeenMs) > streamTimeoutMs)
+                if (!st.active)
+                    continue;
+
+                if ((t - st.lastSeenMs) > streamTimeoutMs)
                 {
-                    it = streams.erase(it);
+                    st.reset();
                     continue;
                 }
 
-                auto& st = it->second;
+                ++activeStreamCount;
                 if (st.sessionId == sessionId)
                 {
                     const int base = st.pairIndex * 2;
@@ -199,9 +243,10 @@ public:
                         }
                     }
                 }
-
-                ++it;
             }
+
+            if (activeStreamCount == 0)
+                sampleRateLocked = false;
 
             for (int ch = 0; ch < numInputChannels; ++ch)
             {
@@ -215,7 +260,6 @@ public:
             dsp.process(mixPtrs.data(), outL.data(), outR.data(), fixedEngineBlockSamples, params);
             shared.sagPct.store(dsp.getBusStressPercent(), std::memory_order_relaxed);
 
-            somma::StereoAudioPacket outPacket {};
             outPacket.header.magic = somma::protocolMagic;
             outPacket.header.version = somma::protocolVersion;
             outPacket.header.packetType = static_cast<uint16_t>(somma::PacketType::mainStereoSum);
@@ -244,6 +288,34 @@ public:
     }
 
 private:
+    StreamState* findStream(uint32_t streamId) noexcept
+    {
+        for (auto& stream : streams)
+        {
+            if (stream.active && stream.streamId == streamId)
+                return &stream;
+        }
+
+        return nullptr;
+    }
+
+    StreamState* allocateStream(uint32_t streamId, uint32_t timeNow) noexcept
+    {
+        for (auto& stream : streams)
+        {
+            if (!stream.active || (timeNow - stream.lastSeenMs) > streamTimeoutMs)
+            {
+                stream.reset();
+                stream.active = true;
+                stream.streamId = streamId;
+                stream.lastSeenMs = timeNow;
+                return &stream;
+            }
+        }
+
+        return nullptr;
+    }
+
     static uint16_t findAvailablePort(juce::DatagramSocket& socket, uint16_t preferred)
     {
         for (int i = 0; i < 200; ++i)
@@ -268,6 +340,7 @@ private:
     }
 
     EngineSharedState& shared;
+    std::array<StreamState, maxActiveStreams> streams;
 };
 
 class MainComponent final : public juce::Component,

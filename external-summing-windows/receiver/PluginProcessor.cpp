@@ -4,7 +4,7 @@
 #include "Protocol.h"
 #include "PortDiscovery.h"
 
-#include <cstring>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -13,31 +13,121 @@ namespace
 constexpr auto paramTrim = "outputTrimDb";
 }
 
+class ReceiverNetworkThread final : public juce::Thread
+{
+public:
+    explicit ReceiverNetworkThread(ReceiverAudioProcessor& p)
+        : juce::Thread("SommaReceiverNetwork"), processor(p)
+    {
+    }
+
+    void run() override
+    {
+        std::unique_ptr<juce::DatagramSocket> socket;
+        uint16_t receivePort = 0;
+        uint32_t lastPortPollMs = 0;
+        std::array<char, somma::maximumInspectedDatagramSize> datagram;
+        somma::StereoAudioPacket packet;
+
+        while (!threadShouldExit())
+        {
+            const auto now = juce::Time::getMillisecondCounter();
+            if (lastPortPollMs == 0 || (now - lastPortPollMs) > 500u)
+            {
+                const auto config = somma::readPorts();
+                processor.transmissionBufferMs.store(config.transmissionBufferMs, std::memory_order_relaxed);
+                if (socket == nullptr || config.engineToReceiver != receivePort)
+                {
+                    auto replacement = std::make_unique<juce::DatagramSocket>();
+                    replacement->setEnablePortReuse(true);
+                    if (replacement->bindToPort(static_cast<int>(config.engineToReceiver), "127.0.0.1"))
+                    {
+                        socket = std::move(replacement);
+                        receivePort = config.engineToReceiver;
+                    }
+                }
+                lastPortPollMs = now;
+            }
+
+            int packetsRead = 0;
+            if (socket != nullptr && socket->waitUntilReady(true, 10) > 0)
+            {
+                while (packetsRead < 64 && !threadShouldExit())
+                {
+                    const int received = socket->read(datagram.data(), static_cast<int>(datagram.size()), false);
+                    if (received <= 0)
+                        break;
+
+                    if (somma::decodeStereoAudioPacket(datagram.data(),
+                                                       static_cast<size_t>(received),
+                                                       somma::PacketType::mainStereoSum,
+                                                       packet)
+                        && packet.header.sampleRate == processor.currentSampleRate)
+                    {
+                        processor.pushPacket(packet);
+                        processor.lastBlockReceived.store(packet.header.blockIndex, std::memory_order_release);
+                        processor.lastReceiveTimeMs.store(now, std::memory_order_release);
+                        processor.connected.store(true, std::memory_order_release);
+                    }
+                    ++packetsRead;
+                }
+            }
+            else if (socket == nullptr)
+            {
+                juce::Thread::sleep(10);
+            }
+
+            const auto lastReceive = processor.lastReceiveTimeMs.load(std::memory_order_acquire);
+            if (lastReceive == 0 || (juce::Time::getMillisecondCounter() - lastReceive) >= 1500u)
+                processor.connected.store(false, std::memory_order_release);
+        }
+
+        processor.connected.store(false, std::memory_order_release);
+    }
+
+private:
+    ReceiverAudioProcessor& processor;
+};
+
 ReceiverAudioProcessor::ReceiverAudioProcessor()
     : AudioProcessor(BusesProperties().withInput("Input", juce::AudioChannelSet::stereo(), true)
                                       .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "PARAMS", createParameterLayout())
 {
-    socket = std::make_unique<juce::DatagramSocket>();
-    socket->setEnablePortReuse(true);
-    socket->bindToPort(static_cast<int>(receivePort));
 }
 
-ReceiverAudioProcessor::~ReceiverAudioProcessor() = default;
+ReceiverAudioProcessor::~ReceiverAudioProcessor()
+{
+    stopNetworkThread();
+}
 
 void ReceiverAudioProcessor::prepareToPlay(double sampleRate, int)
 {
-    writePos = 0;
-    readPos = 0;
-    availableFrames = 0;
+    stopNetworkThread();
+    writePosition.store(0, std::memory_order_relaxed);
+    readPosition.store(0, std::memory_order_relaxed);
     playbackPrimed = false;
-    currentSampleRate = sampleRate > 0.0 ? sampleRate : 48000.0;
+    const auto roundedSampleRate = std::isfinite(sampleRate) && sampleRate > 0.0
+                                 ? static_cast<uint32_t>(std::lround(sampleRate))
+                                 : 0u;
+    currentSampleRate = somma::isSupportedSampleRate(roundedSampleRate) ? roundedSampleRate : 48000u;
     lastOutL = 0.0f;
     lastOutR = 0.0f;
+    lastBlockReceived.store(0, std::memory_order_relaxed);
+    lastReceiveTimeMs.store(0, std::memory_order_relaxed);
+    connected.store(false, std::memory_order_relaxed);
+    resyncRequested.store(false, std::memory_order_relaxed);
+    startNetworkThread();
 }
 
 void ReceiverAudioProcessor::releaseResources()
 {
+    stopNetworkThread();
+    writePosition.store(0, std::memory_order_relaxed);
+    readPosition.store(0, std::memory_order_relaxed);
+    playbackPrimed = false;
+    connected.store(false, std::memory_order_relaxed);
+    resyncRequested.store(false, std::memory_order_relaxed);
 }
 
 bool ReceiverAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -51,73 +141,45 @@ void ReceiverAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     juce::ScopedNoDenormals noDenormals;
     const int numSamples = buffer.getNumSamples();
 
-    for (;;)
-    {
-        const auto now = juce::Time::getMillisecondCounter();
-        if ((now - lastPortPollMs) > 500u)
-        {
-            const auto discoveredConfig = somma::readPorts();
-            const auto discovered = discoveredConfig.engineToReceiver;
-            transmissionBufferMs = discoveredConfig.transmissionBufferMs;
-            if (discovered != receivePort)
-            {
-                auto newSocket = std::make_unique<juce::DatagramSocket>();
-                newSocket->setEnablePortReuse(true);
-                if (newSocket->bindToPort(static_cast<int>(discovered)))
-                {
-                    socket = std::move(newSocket);
-                    receivePort = discovered;
-                }
-            }
-            lastPortPollMs = now;
-        }
-
-        somma::StereoAudioPacket packet {};
-        const int received = socket->read(reinterpret_cast<char*>(&packet), sizeof(packet), false);
-        if (received < static_cast<int>(sizeof(somma::PacketHeader)))
-            break;
-
-        if (!somma::isValidHeader(packet.header)
-            || packet.header.packetType != static_cast<uint16_t>(somma::PacketType::mainStereoSum))
-        {
-            continue;
-        }
-
-        const int copySamples = static_cast<int>(packet.header.numSamples);
-        for (int i = 0; i < copySamples; ++i)
-        {
-            const float l = packet.interleaved[static_cast<size_t>(i * 2)];
-            const float r = packet.interleaved[static_cast<size_t>(i * 2 + 1)];
-            pushFrame(l, r);
-        }
-
-        lastBlockReceived.store(packet.header.blockIndex, std::memory_order_release);
-        lastReceiveTimeMs.store(juce::Time::getMillisecondCounter(), std::memory_order_release);
-    }
-
     buffer.clear();
     float* outL = buffer.getWritePointer(0);
     float* outR = buffer.getWritePointer(1);
     const float trim = juce::Decibels::decibelsToGain(apvts.getRawParameterValue(paramTrim)->load());
     const auto targetBufferFrames = getTargetBufferFrames(numSamples);
+    const bool isConnected = connected.load(std::memory_order_acquire);
+    const auto write = writePosition.load(std::memory_order_acquire);
+    auto read = resyncRequested.exchange(false, std::memory_order_acq_rel)
+              ? write
+              : readPosition.load(std::memory_order_relaxed);
+    auto availableFrames = write - read;
+    if (!isConnected)
+    {
+        read = write;
+        availableFrames = 0;
+        playbackPrimed = false;
+    }
 
-    const bool connected = getConnectedValue() > 0.5f;
     for (int i = 0; i < numSamples; ++i)
     {
         float l = 0.0f;
         float r = 0.0f;
 
-        if (connected && !playbackPrimed && availableFrames >= targetBufferFrames)
+        if (isConnected && !playbackPrimed && availableFrames >= targetBufferFrames)
             playbackPrimed = true;
 
-        if (connected && playbackPrimed && popFrame(l, r))
+        if (isConnected && playbackPrimed && availableFrames > 0)
         {
+            const auto ringIndex = static_cast<size_t>(read % static_cast<uint32_t>(ringFrames));
+            l = ringL[ringIndex];
+            r = ringR[ringIndex];
+            ++read;
+            --availableFrames;
             lastOutL = l;
             lastOutR = r;
         }
         else
         {
-            if (!connected || availableFrames == 0)
+            if (!isConnected || availableFrames == 0)
                 playbackPrimed = false;
 
             lastOutL *= 0.985f;
@@ -129,6 +191,8 @@ void ReceiverAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         outL[i] = l * trim;
         outR[i] = r * trim;
     }
+
+    readPosition.store(read, std::memory_order_release);
 }
 
 juce::AudioProcessorEditor* ReceiverAudioProcessor::createEditor()
@@ -178,44 +242,52 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReceiverAudioProcessor::crea
 
 float ReceiverAudioProcessor::getConnectedValue() const noexcept
 {
-    const auto now = juce::Time::getMillisecondCounter();
-    const auto last = lastReceiveTimeMs.load(std::memory_order_acquire);
-    return (last > 0 && (now - last) < 1500u) ? 1.0f : 0.0f;
+    return connected.load(std::memory_order_acquire) ? 1.0f : 0.0f;
 }
 
-void ReceiverAudioProcessor::pushFrame(float l, float r) noexcept
+void ReceiverAudioProcessor::startNetworkThread()
 {
-    ringL[writePos] = l;
-    ringR[writePos] = r;
-    writePos = (writePos + 1u) % ringFrames;
-
-    if (availableFrames < ringFrames)
-    {
-        ++availableFrames;
-    }
-    else
-    {
-        readPos = (readPos + 1u) % ringFrames;
-    }
+    networkThread = std::make_unique<ReceiverNetworkThread>(*this);
+    networkThread->startThread();
 }
 
-bool ReceiverAudioProcessor::popFrame(float& l, float& r) noexcept
+void ReceiverAudioProcessor::stopNetworkThread()
 {
-    if (availableFrames == 0)
+    if (networkThread == nullptr)
+        return;
+
+    networkThread->signalThreadShouldExit();
+    networkThread->stopThread(2000);
+    networkThread.reset();
+}
+
+bool ReceiverAudioProcessor::pushPacket(const somma::StereoAudioPacket& packet) noexcept
+{
+    const auto write = writePosition.load(std::memory_order_relaxed);
+    const auto read = readPosition.load(std::memory_order_acquire);
+    const auto packetFrames = static_cast<uint32_t>(packet.header.numSamples);
+    if (write - read + packetFrames > ringFrames)
+    {
+        resyncRequested.store(true, std::memory_order_release);
         return false;
+    }
 
-    l = ringL[readPos];
-    r = ringR[readPos];
-    readPos = (readPos + 1u) % ringFrames;
-    --availableFrames;
+    for (uint32_t i = 0; i < packetFrames; ++i)
+    {
+        const auto ringIndex = static_cast<size_t>((write + i) % static_cast<uint32_t>(ringFrames));
+        ringL[ringIndex] = packet.interleaved[static_cast<size_t>(i * 2u)];
+        ringR[ringIndex] = packet.interleaved[static_cast<size_t>(i * 2u + 1u)];
+    }
+
+    writePosition.store(write + packetFrames, std::memory_order_release);
     return true;
 }
 
 size_t ReceiverAudioProcessor::getTargetBufferFrames(int blockSamples) const noexcept
 {
-    const auto safeBufferMs = somma::sanitizeTransmissionBufferMs(transmissionBufferMs);
-    const auto frames = static_cast<size_t>((static_cast<double>(safeBufferMs) * currentSampleRate) / 1000.0);
-    const auto minFrames = static_cast<size_t>(juce::jmax(1, blockSamples));
+    const auto safeBufferMs = somma::sanitizeTransmissionBufferMs(transmissionBufferMs.load(std::memory_order_relaxed));
+    const auto frames = static_cast<size_t>((static_cast<double>(safeBufferMs) * static_cast<double>(currentSampleRate)) / 1000.0);
+    const auto minFrames = juce::jmin(ringFrames / 2u, static_cast<size_t>(juce::jmax(1, blockSamples)));
     return juce::jlimit(minFrames, ringFrames - minFrames, frames);
 }
 

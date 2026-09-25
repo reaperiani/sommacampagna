@@ -7,6 +7,8 @@
 
 #include "Protocol.h"
 
+class ReceiverNetworkThread;
+
 class ReceiverAudioProcessor final : public juce::AudioProcessor
 {
 public:
@@ -41,28 +43,35 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
 private:
-    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() const;
+    friend class ReceiverNetworkThread;
 
-    std::unique_ptr<juce::DatagramSocket> socket;
-    uint16_t receivePort = somma::engineToReceiverPort;
-    uint32_t lastPortPollMs = 0;
-    float transmissionBufferMs = somma::defaultTransmissionBufferMs;
+    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() const;
+    void startNetworkThread();
+    void stopNetworkThread();
+    bool pushPacket(const somma::StereoAudioPacket& packet) noexcept;
+
+    std::unique_ptr<ReceiverNetworkThread> networkThread;
+    std::atomic<float> transmissionBufferMs { somma::defaultTransmissionBufferMs };
     std::atomic<uint32_t> lastBlockReceived { 0 };
     std::atomic<uint32_t> lastReceiveTimeMs { 0 };
+    std::atomic<bool> connected { false };
+    std::atomic<bool> resyncRequested { false };
 
     static constexpr size_t ringFrames = somma::maxBufferedFrames;
+    static_assert(ringFrames < (1u << 31u));
+    static_assert(std::atomic<uint32_t>::is_always_lock_free);
+    static_assert(std::atomic<float>::is_always_lock_free);
+    static_assert(std::atomic<bool>::is_always_lock_free);
+
     std::array<float, ringFrames> ringL {};
     std::array<float, ringFrames> ringR {};
-    size_t writePos = 0;
-    size_t readPos = 0;
-    size_t availableFrames = 0;
+    alignas(64) std::atomic<uint32_t> writePosition { 0 };
+    alignas(64) std::atomic<uint32_t> readPosition { 0 };
     bool playbackPrimed = false;
-    double currentSampleRate = 48000.0;
+    uint32_t currentSampleRate = 48000;
     float lastOutL = 0.0f;
     float lastOutR = 0.0f;
 
-    void pushFrame(float l, float r) noexcept;
-    bool popFrame(float& l, float& r) noexcept;
     size_t getTargetBufferFrames(int blockSamples) const noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ReceiverAudioProcessor)

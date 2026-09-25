@@ -41,6 +41,32 @@ inline bool writePorts(const UdpPorts& p)
     return getPortsFile().replaceWithText(text);
 }
 
+inline bool parsePort(const juce::String& text, uint16_t& port) noexcept
+{
+    const auto value = text.trim();
+    if (value.isEmpty())
+        return false;
+
+    uint32_t parsed = 0;
+    for (int i = 0; i < value.length(); ++i)
+    {
+        const auto character = value[i];
+        if (character < '0' || character > '9')
+            return false;
+
+        const auto digit = static_cast<uint32_t>(character - '0');
+        if (parsed > 6553u || (parsed == 6553u && digit > 5u))
+            return false;
+        parsed = parsed * 10u + digit;
+    }
+
+    if (parsed == 0u)
+        return false;
+
+    port = static_cast<uint16_t>(parsed);
+    return true;
+}
+
 inline UdpPorts readPorts()
 {
     UdpPorts p;
@@ -52,17 +78,13 @@ inline UdpPorts readPorts()
     for (const auto& line : juce::StringArray::fromLines(text))
     {
         if (line.startsWith("senderToEngine="))
-            p.senderToEngine = static_cast<uint16_t>(line.fromFirstOccurrenceOf("=", false, false).getIntValue());
+            parsePort(line.fromFirstOccurrenceOf("=", false, false), p.senderToEngine);
         else if (line.startsWith("engineToReceiver="))
-            p.engineToReceiver = static_cast<uint16_t>(line.fromFirstOccurrenceOf("=", false, false).getIntValue());
+            parsePort(line.fromFirstOccurrenceOf("=", false, false), p.engineToReceiver);
         else if (line.startsWith("transmissionBufferMs="))
             p.transmissionBufferMs = line.fromFirstOccurrenceOf("=", false, false).getFloatValue();
     }
 
-    if (p.senderToEngine == 0)
-        p.senderToEngine = senderToEnginePort;
-    if (p.engineToReceiver == 0)
-        p.engineToReceiver = engineToReceiverPort;
     p.transmissionBufferMs = sanitizeTransmissionBufferMs(p.transmissionBufferMs);
 
     return p;

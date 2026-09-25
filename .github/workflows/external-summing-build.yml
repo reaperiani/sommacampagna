@@ -1,0 +1,142 @@
+name: External Summing Builds
+
+on:
+  push:
+    paths:
+      - "external-summing-windows/**"
+      - "Source/SummerDSP.h"
+      - "buildpack/build-external-macos.sh"
+      - ".github/workflows/external-summing-build.yml"
+  pull_request:
+    paths:
+      - "external-summing-windows/**"
+      - "Source/SummerDSP.h"
+      - "buildpack/build-external-macos.sh"
+      - ".github/workflows/external-summing-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  JUCE_TAG: "8.0.12"
+
+jobs:
+  windows:
+    name: Windows Release
+    runs-on: windows-2022
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Check out JUCE
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          ref: ${{ env.JUCE_TAG }}
+          path: external/JUCE
+          persist-credentials: false
+
+      - name: Configure
+        shell: pwsh
+        run: >-
+          cmake -B build-external -S external-summing-windows
+          -G "Visual Studio 17 2022"
+          "-DJUCE_DIR=${{ github.workspace }}/external/JUCE"
+          -DJUCE_COPY_PLUGIN_AFTER_BUILD=OFF
+
+      - name: Build
+        shell: pwsh
+        run: >-
+          cmake --build build-external --config Release --target
+          sommacampagna_engine
+          sommacampagna_sender_VST3
+          sommacampagna_receiver_VST3
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $packageDir = "package/windows"
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+          Copy-Item "build-external/sommacampagna_engine_artefacts/Release/sommacampagna_engine.exe" $packageDir
+          Copy-Item "build-external/sommacampagna_sender_artefacts/Release/VST3/sommacampagna_sender.vst3" $packageDir -Recurse
+          Copy-Item "build-external/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3" $packageDir -Recurse
+          Compress-Archive -Path "$packageDir/*" -DestinationPath "package/sommacampagna-external-windows.zip"
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sommacampagna-external-windows
+          path: package/sommacampagna-external-windows.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS Universal Release
+    runs-on: macos-14
+    env:
+      CMAKE_OSX_ARCHITECTURES: "arm64;x86_64"
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Check out JUCE
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          ref: ${{ env.JUCE_TAG }}
+          path: external/JUCE
+          persist-credentials: false
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -B build-external-osx -S external-summing-windows -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+            -DJUCE_DIR="${GITHUB_WORKSPACE}/external/JUCE" \
+            -DJUCE_COPY_PLUGIN_AFTER_BUILD=OFF
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build build-external-osx --target \
+            sommacampagna_engine \
+            sommacampagna_sender_VST3 \
+            sommacampagna_sender_au_AU \
+            sommacampagna_receiver_VST3 \
+            sommacampagna_receiver_au_AU
+
+      - name: Verify Universal binaries
+        shell: bash
+        run: |
+          binaries=(
+            "build-external-osx/sommacampagna_engine_artefacts/Release/sommacampagna_engine.app/Contents/MacOS/sommacampagna_engine"
+            "build-external-osx/sommacampagna_sender_artefacts/Release/VST3/sommacampagna_sender.vst3/Contents/MacOS/sommacampagna_sender"
+            "build-external-osx/sommacampagna_sender_au_artefacts/Release/AU/sommacampagna_sender.component/Contents/MacOS/sommacampagna_sender"
+            "build-external-osx/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3/Contents/MacOS/sommacampagna_receiver"
+            "build-external-osx/sommacampagna_receiver_au_artefacts/Release/AU/sommacampagna_receiver.component/Contents/MacOS/sommacampagna_receiver"
+          )
+          for binary in "${binaries[@]}"; do
+            lipo -verify_arch arm64 x86_64 "$binary"
+            lipo -info "$binary"
+          done
+
+      - name: Package
+        shell: bash
+        run: |
+          package_dir="package/macos"
+          mkdir -p "$package_dir"
+          ditto "build-external-osx/sommacampagna_engine_artefacts/Release/sommacampagna_engine.app" "$package_dir/sommacampagna_engine.app"
+          ditto "build-external-osx/sommacampagna_sender_artefacts/Release/VST3/sommacampagna_sender.vst3" "$package_dir/sommacampagna_sender.vst3"
+          ditto "build-external-osx/sommacampagna_sender_au_artefacts/Release/AU/sommacampagna_sender.component" "$package_dir/sommacampagna_sender.component"
+          ditto "build-external-osx/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3" "$package_dir/sommacampagna_receiver.vst3"
+          ditto "build-external-osx/sommacampagna_receiver_au_artefacts/Release/AU/sommacampagna_receiver.component" "$package_dir/sommacampagna_receiver.component"
+          ditto -c -k --sequesterRsrc --keepParent "$package_dir" "package/sommacampagna-external-macos-universal.zip"
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sommacampagna-external-macos-universal
+          path: package/sommacampagna-external-macos-universal.zip
+          if-no-files-found: error
