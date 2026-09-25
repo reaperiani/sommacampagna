@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="it">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>sommacampagna - alpha build</title>
+    <style>
+        :root {
+            --bg: #001a16;
+            --panel: #003d33;
+            --panel-2: #005247;
+            --text: #d6ffe9;
+            --accent: #ffe66d;
+            --danger: #ff7f7f;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: "Courier New", Courier, monospace;
+            color: var(--text);
+            background:
+                radial-gradient(circle at 25% 20%, #01483f 0, transparent 35%),
+                radial-gradient(circle at 75% 80%, #01352f 0, transparent 40%),
+                repeating-linear-gradient(
+                    0deg,
+                    #001a16,
+                    #001a16 4px,
+                    #001f1a 4px,
+                    #001f1a 8px
+                );
+            min-height: 100vh;
+        }
+
+        .wrap {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .window {
+            border: 3px solid #00e6c3;
+            background: var(--panel);
+            box-shadow: 8px 8px 0 #000;
+        }
+
+        .titlebar {
+            background: linear-gradient(90deg, #00bfa5, #00796b);
+            color: #001510;
+            font-weight: 700;
+            padding: 8px 12px;
+            border-bottom: 3px solid #00e6c3;
+        }
+
+        .content {
+            padding: 16px;
+        }
+
+        h1 {
+            margin: 0 0 8px;
+            font-size: 30px;
+            line-height: 1.1;
+            color: var(--accent);
+            text-shadow: 2px 2px 0 #000;
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 4px 8px;
+            border: 2px dashed var(--danger);
+            color: #fff;
+            background: #5e0000;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+        }
+
+        .box {
+            border: 2px solid #00d7b8;
+            background: var(--panel-2);
+            padding: 12px;
+        }
+
+        .dl {
+            display: inline-block;
+            margin-top: 8px;
+            padding: 10px 14px;
+            border: 2px solid #fff;
+            background: #002822;
+            color: #fff;
+            text-decoration: none;
+            font-weight: 700;
+        }
+
+        .dl:hover {
+            background: #00483d;
+            color: var(--accent);
+        }
+
+        .small {
+            font-size: 13px;
+            opacity: 0.9;
+        }
+
+        .schema {
+            margin-top: 10px;
+            width: 100%;
+            max-width: 760px;
+            border: 2px solid #00d7b8;
+            background: #001f1a;
+            display: block;
+        }
+
+        .footer {
+            margin-top: 16px;
+            text-align: center;
+            font-size: 13px;
+            opacity: 0.85;
+        }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <div class="window">
+            <div class="titlebar">💾 SOMMACAMPAGNA.EXE // WEB PANEL 1999</div>
+            <div class="content">
+                <marquee behavior="alternate" scrollamount="7">🚧⚙️ WORK IN PROGRESS ⚙️ ALPHA BUILD ⚙️ WORK IN PROGRESS ⚙️🚧</marquee>
+
+                <h1>🎚️ sommacampagna plugin pack</h1>
+                <div class="tag">ALPHA • NON STABILE • USA A TUO RISCHIO</div>
+
+                <div class="grid">
+                    <div class="box">
+                        <strong>📦 Download build:</strong><br>
+                        versione prototipo con routing 16 IN / 2 OUT, BUS STRESS e griglia LED 4x4.
+                        <br>
+                        <a class="dl" href="sommacampagna-vst3-user-pack.zip" download>⬇️ WINDOWS (VST3)</a>
+                        <br>
+                        <a class="dl" href="sommacampagna-osx-vst3-au.zip" download>⬇️ MACOS (VST3 + AU)</a>
+                        <div class="small">File Win: <code>sommacampagna-vst3-user-pack.zip</code></div>
+                        <div class="small">File macOS: <code>sommacampagna-osx-vst3-au.zip</code></div>
+
+                        <br>
+                        <strong>📦 versione standalone sommatore esterno piu' plugin di comunicazione con daw</strong><br>
+                        <a class="dl" href="sommacampagna-external-windows-release.zip" download>⬇️ WINDOWS (ENGINE + SENDER/RECEIVER)</a>
+                        <br>
+                        <a class="dl" href="sommacampagna-macos-2026-06-02.zip" download>⬇️ MACOS UNIVERSAL (ENGINE + PLUGIN PACK)</a>
+                        <div class="small">File Win: <code>sommacampagna-external-windows-release.zip</code></div>
+                        <div class="small">File macOS universal: <code>sommacampagna-macos-2026-06-02.zip</code></div>
+                        <img class="schema" src="schema.png" alt="Schema standalone engine con sender/receiver" />
+                    </div>
+
+                    <div class="box">
+                        <strong>🧪 Stato attuale:</strong>
+                        <ul>
+                            <li>✅ Build Windows VST3 pronta</li>
+                            <li>✅ Build macOS VST3 + AU pronta</li>
+                            <li>✅ Parametri base disponibili</li>
+                            <li>✅ UI custom con meter LED 4x4</li>
+                            <li>⚠️ Tuning DSP ancora in corso</li>
+                        </ul>
+                    </div>
+
+                    <div class="box">
+                        <strong>🛸 Istruzioni lampo:</strong><br>
+                        Windows:<br>
+                        1) Scarica lo zip Windows<br>
+                        2) Estrai <code>sommacampagna.vst3</code><br>
+                        3) Copia in <code>C:\Program Files\Common Files\VST3</code><br>
+                        4) Rescan in REAPER<br><br>
+                        macOS:<br>
+                        1) Scarica lo zip macOS<br>
+                        2) Estrai i bundle plugin<br>
+                        3) Copia VST3 in <code>/Library/Audio/Plug-Ins/VST3</code><br>
+                        4) Copia AU in <code>/Library/Audio/Plug-Ins/Components</code>
+                    </div>
+                </div>
+
+                <div class="footer">
+                    🧱 made by reaperiani • 🌐 vintage web vibes • 🧷 alpha channel unlocked
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

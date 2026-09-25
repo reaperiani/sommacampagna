@@ -1,0 +1,32 @@
+# CMake and IDE build output
+/build/
+/build-*/
+/cmake-build-*/
+/.vs/
+/.vscode/
+/.idea/
+
+# Local JUCE checkouts and archives
+/external/JUCE/
+/external/JUCE-master/
+/external/JUCE-master.zip
+
+# Compiled and packaged artifacts
+*.a
+*.dll
+*.dylib
+*.exe
+*.exp
+*.ilk
+*.lib
+*.pdb
+*.so
+*.zip
+*.component/
+*.vst3/
+
+# Local-only files
+/session
+/domande podcast da far registrare.txt
+.DS_Store
+Thumbs.db
