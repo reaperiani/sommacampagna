@@ -1,52 +1,37 @@
 # AGENTS.md
 
-## Repo Shape
-
-- C++20 JUCE/CMake repo with two separate products: root `sommacampagna` multichannel plugin and `external-summing-windows` sender/engine/receiver MVP.
-- Root plugin entrypoints: `Source/PluginProcessor.*`, `Source/PluginEditor.*`, DSP in `Source/SummerDSP.h`.
-- External summing entrypoints: `external-summing-windows/engine/main.cpp`, `sender/PluginProcessor.*`, `receiver/PluginProcessor.*`, shared UDP/config in `external-summing-windows/shared/Protocol.h` and `PortDiscovery.h`.
-- `external/JUCE-master/` is a vendored JUCE checkout; do not edit it unless the task is explicitly about JUCE itself.
+## Project Boundaries
+- This is C++20/JUCE with two independent CMake projects: the root `sommacampagna` plugin and `external-summing-windows/` (historical name) for the cross-platform engine, sender, and receiver.
+- Root entrypoints are `Source/PluginProcessor.*` and `PluginEditor.*`; `Source/SummerDSP.h` is also compiled into the external engine, so DSP changes affect both products.
+- External entrypoints are `engine/main.cpp`, `sender/PluginProcessor.*`, and `receiver/PluginProcessor.*`; transport/config ABI lives in `shared/Protocol.h` and `PortDiscovery.h`.
+- `external/JUCE/` and `external/JUCE-master/` are ignored local checkouts, not repository-owned source. Do not edit them; `buildpack/bootstrap-juce.sh` fetches JUCE 8.0.12.
 
 ## Build Commands
-
-- All CMake config requires `-DJUCE_DIR=<path-to-JUCE>`; there are no CMake presets.
-- Root Windows configure/build:
-  `cmake -B build -S . -G "Visual Studio 17 2022" -DJUCE_DIR="C:/path/to/JUCE"`
-  `cmake --build build --config Release --target sommacampagna_VST3`
-- Root macOS/Linux scripts expect JUCE at `external/JUCE` unless `JUCE_DIR` is set:
-  `./buildpack/bootstrap-juce.sh`
-  `./buildpack/build-macos.sh`
-  `./buildpack/build-linux.sh`
-- External summing Windows configure/build:
-  `cmake -B build-external -S external-summing-windows -G "Visual Studio 17 2022" -DJUCE_DIR="C:/path/to/JUCE"`
-  `cmake --build build-external --config Release --target sommacampagna_engine`
-  `cmake --build build-external --config Release --target sommacampagna_sender_VST3`
-  `cmake --build build-external --config Release --target sommacampagna_receiver_VST3`
-- External summing Universal macOS build:
-  `JUCE_DIR="/path/to/JUCE-8.0.12" ./buildpack/build-external-macos.sh`
-  This builds the engine plus sender/receiver VST3 and AU products for `arm64;x86_64`.
+- There are no CMake presets. Every configure requires `-DJUCE_DIR=<JUCE checkout>`; CI and release scripts use JUCE 8.0.12.
+- Root Windows VST3: `cmake -B build -S . -G "Visual Studio 17 2022" -A x64 -DJUCE_DIR="C:/path/to/JUCE"`, then `cmake --build build --config Release --target sommacampagna_VST3`.
+- Root macOS/Linux: run `./buildpack/bootstrap-juce.sh`, then `./buildpack/build-macos.sh` or `./buildpack/build-linux.sh`; these build VST3+AU or VST3+LV2 respectively.
+- External Windows: `cmake -B build-external -S external-summing-windows -G "Visual Studio 17 2022" -A x64 -DJUCE_DIR="C:/path/to/JUCE"`, then `cmake --build build-external --config Release --target sommacampagna_engine sommacampagna_sender_VST3 sommacampagna_receiver_VST3`.
+- External macOS Universal: `JUCE_DIR="/path/to/JUCE-8.0.12" ./buildpack/build-external-macos.sh`; this builds engine, VST3, and AU for `arm64;x86_64` and verifies every binary with `lipo`.
 
 ## Verification
+- No unit/integration/CTest/lint/formatter suite is committed. Build the smallest affected target; changes to `Protocol.h`, `PortDiscovery.h`, or shared sender/receiver behavior require all three external Windows targets and the macOS VST3/AU CI build.
+- Manual root-plugin checks require a `16 in / 2 out` layout. External checks require engine + sender(s) + receiver, matching sample rates, real-time playback, and common DAW buffer sizes.
+- External offline/faster-than-real-time bounce is not guaranteed, and its buffering latency is not reported to the DAW for PDC; test parallel/dry paths explicitly.
 
-- No committed unit, integration, CTest, lint, or formatter pipeline exists.
-- After code changes, build the smallest affected CMake target; for shared external protocol changes, build `sommacampagna_engine`, `sommacampagna_sender_VST3`, and `sommacampagna_receiver_VST3`.
-- Manual audio checks matter: root plugin expects `16 in / 2 out`; external summing expects engine running first, senders on source tracks, receiver on return/aux.
+## External Transport
+- UDP is loopback-only: sender to engine defaults to `45570`, engine to receiver to `45571`; runtime ports and global `transmissionBufferMs` are published under `juce::File::userApplicationDataDirectory/sommacampagna/udp-ports.txt`.
+- UDP/file work belongs on the existing worker threads, never in `processBlock`. Audio callbacks must not allocate, lock, log, block, or perform file/network I/O.
+- The sender always clears its plugin output; `bypassSend` suppresses sending and is not audio passthrough.
+- `PacketHeader` is sent as a raw fixed-layout struct. Coordinate protocol/layout changes across sender, engine, and receiver, preserve its static assertions, and bump `protocolVersion` for incompatible packets.
+- Keep old port files readable: missing or invalid `transmissionBufferMs` must fall back safely and remain clamped to protocol limits.
 
-## External Summing Gotchas
+## Compatibility Constraints
+- Do not rename APVTS parameter IDs, plugin/manufacturer codes, or bundle IDs after release; hosts use them for automation, session recall, and plugin identity.
+- Keep nonlinear/accumulation DSP internals in `double` and audio-buffer I/O in `float`.
+- Preserve the existing 4-space C++ formatting and brace style; avoid unrelated reformatting.
 
-- Transport is localhost UDP (`127.0.0.1`): sender to engine defaults `45570`, engine to receiver defaults `45571`.
-- Engine, sender, and receiver discover runtime ports via `juce::File::userApplicationDataDirectory/sommacampagna/udp-ports.txt`; this path is cross-platform through JUCE, not Windows-only.
-- `PortDiscovery.h` also carries global `transmissionBufferMs`; keep old config files compatible by defaulting/clamping missing or invalid values.
-- Sender mutes its plugin output after sending to avoid doubled audio.
-- Engine GUI owns the global transmission buffer control; receiver reads it from the shared config file.
-
-## Code Constraints
-
-- Keep APVTS parameter IDs stable; changing IDs breaks automation/session recall.
-- Audio callbacks must not allocate, lock, log, do file I/O, or block; preallocate buffers and use atomics for processor/editor or thread communication.
-- Use `double` for nonlinear/accumulation DSP internals and `float` for audio buffer I/O.
-- Preserve existing 4-space formatting and brace style; avoid unrelated reformatting.
-
-## Existing Instruction Files
-
-- No `.cursorrules`, `.cursor/rules/`, `.github/copilot-instructions.md`, `CLAUDE.md`, or repo-local `opencode.json` are present at the time this file was updated.
+## CI And Releases
+- `.github/workflows/external-summing-build.yml` builds Windows x64 and macOS Universal on relevant pushes/PRs; tag builds also package both platforms and generate SHA-256 checksums.
+- External versioning comes from `external-summing-windows/CMakeLists.txt`. Update it with `CHANGELOG.md`, push the candidate, and require both platform jobs to pass before tagging the exact matching `v<version>`.
+- A matching tag creates a draft GitHub Release. The workflow may replace assets only while it remains a draft and intentionally refuses to overwrite a published release.
+- CI artifacts are not Authenticode-signed, Developer-ID-signed, or notarized. Follow `external-summing-windows/RELEASE.md` before publishing, and never commit signing credentials to this public repository.

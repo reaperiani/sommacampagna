@@ -163,6 +163,11 @@ jobs:
           ditto "build-external-osx/sommacampagna_receiver_au_artefacts/Release/AU/sommacampagna_receiver.component" "$package_dir/Plugins/Components/sommacampagna_receiver.component"
           cp "external-summing-windows/RELEASE-MACOS-README.md" "$package_dir/README.md"
           cp "external-summing-windows/CHANGELOG.md" "$package_dir/CHANGELOG.md"
+          cp "external-summing-windows/installer/macos/install-macos.command" "$package_dir/install-macos.command"
+          cp "external-summing-windows/installer/macos/uninstall-macos.command" "$package_dir/uninstall-macos.command"
+          chmod +x "$package_dir/install-macos.command" "$package_dir/uninstall-macos.command"
+          bash -n "$package_dir/install-macos.command" "$package_dir/uninstall-macos.command"
+          test -x "$package_dir/install-macos.command" && test -x "$package_dir/uninstall-macos.command"
           printf 'Version: %s\nCommit: %s\nJUCE: %s\nPlatform: macOS Universal (arm64, x86_64)\n' \
             "$PACKAGE_VERSION" "$GITHUB_SHA" "$JUCE_TAG" > "$package_dir/BUILD-INFO.txt"
           ditto -c -k --sequesterRsrc --keepParent "$package_dir" "package/${package_name}.zip"
@@ -218,7 +223,7 @@ jobs:
           Prima preview multipiattaforma di sommacampagna external summing ${PACKAGE_VERSION}.
 
           - Windows x64: engine e plugin VST3
-          - macOS Universal: engine, VST3 e AU per arm64 e x86_64
+          - macOS Universal: engine, VST3 e AU per arm64 e x86_64, con installer e uninstaller utente
 
           Prima di pubblicare la bozza completare i controlli in external-summing-windows/RELEASE.md, inclusi licenza, firma Windows, firma/notarizzazione macOS e test audio manuali.
           EOF

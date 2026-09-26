@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- Aggiunti installer e uninstaller macOS per installazione locale all'utente senza `sudo`.
+- L'installer rimuove la quarantena esclusivamente dai bundle installati e avvia la validazione AU.
+
 ## 0.1.0
 
 - Prima preview del motore di somma esterno localhost.
