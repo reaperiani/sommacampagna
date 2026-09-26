@@ -2,6 +2,8 @@ name: External Summing Builds
 
 on:
   push:
+    branches:
+      - "**"
     tags:
       - "v*"
     paths:
