@@ -17,6 +17,8 @@ endif()
 add_subdirectory(${JUCE_DIR} JUCE)
 
 juce_add_gui_app(sommacampagna_engine
+  COMPANY_NAME "reaperiani"
+  COMPANY_WEBSITE "https://github.com/reaperiani/sommacampagna"
   BUNDLE_ID "com.reaperiani.sommacampagna.engine"
   PRODUCT_NAME "sommacampagna_engine"
 )
@@ -42,10 +44,12 @@ target_link_libraries(sommacampagna_engine PRIVATE
 target_compile_definitions(sommacampagna_engine PUBLIC
   JUCE_WEB_BROWSER=0
   JUCE_USE_CURL=0
+  SOMMACAMPAGNA_VERSION="${PROJECT_VERSION}"
 )
 
 juce_add_plugin(sommacampagna_sender
   COMPANY_NAME "reaperiani"
+  COMPANY_WEBSITE "https://github.com/reaperiani/sommacampagna"
   BUNDLE_ID "com.reaperiani.sommacampagna.sender"
   IS_SYNTH FALSE
   NEEDS_MIDI_INPUT FALSE
@@ -82,6 +86,7 @@ target_link_libraries(sommacampagna_sender PRIVATE
 
 juce_add_plugin(sommacampagna_receiver
   COMPANY_NAME "reaperiani"
+  COMPANY_WEBSITE "https://github.com/reaperiani/sommacampagna"
   BUNDLE_ID "com.reaperiani.sommacampagna.receiver"
   IS_SYNTH FALSE
   NEEDS_MIDI_INPUT FALSE
@@ -119,6 +124,7 @@ target_link_libraries(sommacampagna_receiver PRIVATE
 if(APPLE)
   juce_add_plugin(sommacampagna_sender_au
     COMPANY_NAME "reaperiani"
+    COMPANY_WEBSITE "https://github.com/reaperiani/sommacampagna"
     BUNDLE_ID "com.reaperiani.sommacampagna.sender.au"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
@@ -154,6 +160,7 @@ if(APPLE)
 
   juce_add_plugin(sommacampagna_receiver_au
     COMPANY_NAME "reaperiani"
+    COMPANY_WEBSITE "https://github.com/reaperiani/sommacampagna"
     BUNDLE_ID "com.reaperiani.sommacampagna.receiver.au"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE

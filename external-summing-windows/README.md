@@ -29,7 +29,10 @@ replacement for, The Analog Molecule.
 - The engine accumulates concurrent sender streams and processes their stereo sum.
 - Sender and receiver networking runs on dedicated worker threads rather than DAW audio callbacks.
 - Real-time playback is supported; faster-than-real-time/offline bounce is not yet guaranteed.
-- UDP packet loss, reordering, and clock drift are not yet corrected.
+- Packet loss and reordering trigger receiver re-synchronization.
+- Engine and receiver apply bounded clock-drift correction while keeping the configured buffer target.
+- Engine, sender, receiver, and DAW must use the same sample rate.
+- The external path adds buffering latency that is not yet reported to the DAW for plug-in delay compensation.
 
 ## Ports
 
@@ -47,6 +50,7 @@ cmake --build build-external --config Release --target sommacampagna_receiver_VS
 ```
 
 For Universal macOS VST3/AU builds, see [`BUILD-OSX.md`](BUILD-OSX.md).
+Release packaging and publication gates are documented in [`RELEASE.md`](RELEASE.md).
 
 ## Quick run
 

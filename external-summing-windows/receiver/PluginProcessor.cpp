@@ -26,6 +26,9 @@ public:
         std::unique_ptr<juce::DatagramSocket> socket;
         uint16_t receivePort = 0;
         uint32_t lastPortPollMs = 0;
+        uint32_t sessionId = 0;
+        uint32_t expectedBlock = 0;
+        bool haveSequence = false;
         std::array<char, somma::maximumInspectedDatagramSize> datagram;
         somma::StereoAudioPacket packet;
 
@@ -38,12 +41,20 @@ public:
                 processor.transmissionBufferMs.store(config.transmissionBufferMs, std::memory_order_relaxed);
                 if (socket == nullptr || config.engineToReceiver != receivePort)
                 {
+                    const bool replacingSocket = socket != nullptr;
                     auto replacement = std::make_unique<juce::DatagramSocket>();
                     replacement->setEnablePortReuse(true);
                     if (replacement->bindToPort(static_cast<int>(config.engineToReceiver), "127.0.0.1"))
                     {
                         socket = std::move(replacement);
                         receivePort = config.engineToReceiver;
+                        haveSequence = false;
+                        if (replacingSocket)
+                        {
+                            processor.resyncRequested.store(true, std::memory_order_release);
+                            processor.lastReceiveTimeMs.store(0, std::memory_order_release);
+                            processor.connected.store(false, std::memory_order_release);
+                        }
                     }
                 }
                 lastPortPollMs = now;
@@ -64,7 +75,16 @@ public:
                                                        packet)
                         && packet.header.sampleRate == processor.currentSampleRate)
                     {
+                        if (haveSequence
+                            && (packet.header.sessionId != sessionId || packet.header.blockIndex != expectedBlock))
+                        {
+                            processor.resyncRequested.store(true, std::memory_order_release);
+                        }
+
                         processor.pushPacket(packet);
+                        sessionId = packet.header.sessionId;
+                        expectedBlock = packet.header.blockIndex + 1u;
+                        haveSequence = true;
                         processor.lastBlockReceived.store(packet.header.blockIndex, std::memory_order_release);
                         processor.lastReceiveTimeMs.store(now, std::memory_order_release);
                         processor.connected.store(true, std::memory_order_release);
@@ -79,7 +99,13 @@ public:
 
             const auto lastReceive = processor.lastReceiveTimeMs.load(std::memory_order_acquire);
             if (lastReceive == 0 || (juce::Time::getMillisecondCounter() - lastReceive) >= 1500u)
-                processor.connected.store(false, std::memory_order_release);
+            {
+                if (processor.connected.exchange(false, std::memory_order_acq_rel))
+                {
+                    processor.resyncRequested.store(true, std::memory_order_release);
+                    haveSequence = false;
+                }
+            }
         }
 
         processor.connected.store(false, std::memory_order_release);
@@ -111,6 +137,8 @@ void ReceiverAudioProcessor::prepareToPlay(double sampleRate, int)
                                  ? static_cast<uint32_t>(std::lround(sampleRate))
                                  : 0u;
     currentSampleRate = somma::isSupportedSampleRate(roundedSampleRate) ? roundedSampleRate : 48000u;
+    fractionalReadPhase = 0.0;
+    clockCorrection = 0.0;
     lastOutL = 0.0f;
     lastOutR = 0.0f;
     lastBlockReceived.store(0, std::memory_order_relaxed);
@@ -126,6 +154,8 @@ void ReceiverAudioProcessor::releaseResources()
     writePosition.store(0, std::memory_order_relaxed);
     readPosition.store(0, std::memory_order_relaxed);
     playbackPrimed = false;
+    fractionalReadPhase = 0.0;
+    clockCorrection = 0.0;
     connected.store(false, std::memory_order_relaxed);
     resyncRequested.store(false, std::memory_order_relaxed);
 }
@@ -147,40 +177,70 @@ void ReceiverAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     const float trim = juce::Decibels::decibelsToGain(apvts.getRawParameterValue(paramTrim)->load());
     const auto targetBufferFrames = getTargetBufferFrames(numSamples);
     const bool isConnected = connected.load(std::memory_order_acquire);
+    const bool shouldResync = resyncRequested.exchange(false, std::memory_order_acq_rel);
     const auto write = writePosition.load(std::memory_order_acquire);
-    auto read = resyncRequested.exchange(false, std::memory_order_acq_rel)
-              ? write
-              : readPosition.load(std::memory_order_relaxed);
+    auto read = shouldResync ? write : readPosition.load(std::memory_order_relaxed);
     auto availableFrames = write - read;
-    if (!isConnected)
+    if (!isConnected || shouldResync)
     {
         read = write;
         availableFrames = 0;
         playbackPrimed = false;
+        fractionalReadPhase = 0.0;
+        clockCorrection = 0.0;
     }
 
+    const auto minimumPrimingFrames = juce::jmax(targetBufferFrames, static_cast<size_t>(2));
+    if (isConnected && !playbackPrimed && availableFrames >= minimumPrimingFrames)
+    {
+        playbackPrimed = true;
+        fractionalReadPhase = 0.0;
+        clockCorrection = 0.0;
+    }
+
+    if (isConnected && playbackPrimed)
+    {
+        const auto occupancy = static_cast<double>(availableFrames) - fractionalReadPhase;
+        const auto occupancyError = occupancy - static_cast<double>(targetBufferFrames);
+        const auto correctionTarget = somma::getClockCorrectionTarget(occupancyError);
+        clockCorrection = somma::smoothClockCorrection(clockCorrection,
+                                                       correctionTarget,
+                                                       static_cast<uint32_t>(juce::jmax(0, numSamples)),
+                                                       currentSampleRate);
+    }
+
+    const auto sourceStep = 1.0 + clockCorrection;
     for (int i = 0; i < numSamples; ++i)
     {
         float l = 0.0f;
         float r = 0.0f;
 
-        if (isConnected && !playbackPrimed && availableFrames >= targetBufferFrames)
-            playbackPrimed = true;
-
-        if (isConnected && playbackPrimed && availableFrames > 0)
+        if (isConnected && playbackPrimed && availableFrames >= 2u)
         {
             const auto ringIndex = static_cast<size_t>(read % static_cast<uint32_t>(ringFrames));
-            l = ringL[ringIndex];
-            r = ringR[ringIndex];
-            ++read;
-            --availableFrames;
+            const auto nextRingIndex = static_cast<size_t>((read + 1u) % static_cast<uint32_t>(ringFrames));
+            const auto phase = static_cast<float>(fractionalReadPhase);
+            l = ringL[ringIndex] + phase * (ringL[nextRingIndex] - ringL[ringIndex]);
+            r = ringR[ringIndex] + phase * (ringR[nextRingIndex] - ringR[ringIndex]);
+
+            fractionalReadPhase += sourceStep;
+            const auto consumedFrames = static_cast<uint32_t>(fractionalReadPhase);
+            fractionalReadPhase -= static_cast<double>(consumedFrames);
+            read += consumedFrames;
+            availableFrames -= consumedFrames;
             lastOutL = l;
             lastOutR = r;
         }
         else
         {
-            if (!isConnected || availableFrames == 0)
+            if (isConnected && playbackPrimed)
+            {
+                read = write;
+                availableFrames = 0;
                 playbackPrimed = false;
+                fractionalReadPhase = 0.0;
+                clockCorrection = 0.0;
+            }
 
             lastOutL *= 0.985f;
             lastOutR *= 0.985f;

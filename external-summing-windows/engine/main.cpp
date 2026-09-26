@@ -135,6 +135,7 @@ public:
 
         uint32_t outBlock = 0;
         uint32_t sessionId = 1;
+        double clockCorrection = 0.0;
         auto nextSend = juce::Time::getMillisecondCounterHiRes();
         uint32_t lastConfigWriteMs = nowMs();
         float lastPublishedBufferMs = shared.transmissionBufferMs.load(std::memory_order_relaxed);
@@ -162,6 +163,7 @@ public:
                     sessionId = packet.header.sessionId;
                     dsp.prepare(static_cast<double>(sampleRate));
                     sampleRateLocked = true;
+                    clockCorrection = 0.0;
                     nextSend = juce::Time::getMillisecondCounterHiRes();
                 }
 
@@ -208,6 +210,8 @@ public:
             const uint32_t t = nowMs();
             const auto targetBufferFrames = getTargetBufferFrames(shared.transmissionBufferMs.load(std::memory_order_relaxed), sampleRate);
             size_t activeStreamCount = 0;
+            size_t primedStreamCount = 0;
+            double primedOccupancyFrames = 0.0;
             for (auto& st : streams)
             {
                 if (!st.active)
@@ -228,6 +232,8 @@ public:
 
                     if (st.playbackPrimed)
                     {
+                        primedOccupancyFrames += static_cast<double>(st.availableFrames);
+                        ++primedStreamCount;
                         for (int i = 0; i < fixedEngineBlockSamples; ++i)
                         {
                             float l = 0.0f;
@@ -246,7 +252,24 @@ public:
             }
 
             if (activeStreamCount == 0)
+            {
                 sampleRateLocked = false;
+                clockCorrection = 0.0;
+            }
+            else if (primedStreamCount > 0)
+            {
+                const auto averageOccupancy = primedOccupancyFrames / static_cast<double>(primedStreamCount);
+                const auto occupancyError = averageOccupancy - static_cast<double>(targetBufferFrames);
+                const auto correctionTarget = somma::getClockCorrectionTarget(occupancyError);
+                clockCorrection = somma::smoothClockCorrection(clockCorrection,
+                                                               correctionTarget,
+                                                               fixedEngineBlockSamples,
+                                                               sampleRate);
+            }
+            else
+            {
+                clockCorrection = 0.0;
+            }
 
             for (int ch = 0; ch < numInputChannels; ++ch)
             {
@@ -278,7 +301,8 @@ public:
             outSocket.write("127.0.0.1", static_cast<int>(selectedOutPort), reinterpret_cast<const char*>(&outPacket), bytesToSend);
 
             const double blockMs = (static_cast<double>(fixedEngineBlockSamples) / static_cast<double>(sampleRate)) * 1000.0;
-            nextSend += blockMs;
+            // Positive occupancy error speeds consumption: T = Tnominal / (1 + correction).
+            nextSend += blockMs / (1.0 + clockCorrection);
             const double waitMs = nextSend - juce::Time::getMillisecondCounterHiRes();
             if (waitMs > 0.0)
                 juce::Thread::sleep(static_cast<int>(waitMs));
@@ -486,7 +510,7 @@ class SommaEngineApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "sommacampagna_engine"; }
-    const juce::String getApplicationVersion() override { return "0.1.0"; }
+    const juce::String getApplicationVersion() override { return SOMMACAMPAGNA_VERSION; }
 
     void initialise(const juce::String&) override
     {

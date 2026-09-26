@@ -2,6 +2,8 @@ name: External Summing Builds
 
 on:
   push:
+    tags:
+      - "v*"
     paths:
       - "external-summing-windows/**"
       - "Source/SummerDSP.h"
@@ -37,11 +39,19 @@ jobs:
           path: external/JUCE
           persist-credentials: false
 
+      - name: Read project version
+        shell: pwsh
+        run: |
+          $match = Select-String -Path "external-summing-windows/CMakeLists.txt" -Pattern 'project\(SommacampagnaExternalSumming VERSION ([0-9]+\.[0-9]+\.[0-9]+)\)'
+          if ($null -eq $match) { throw "Unable to read project version" }
+          "PACKAGE_VERSION=$($match.Matches[0].Groups[1].Value)" >> $env:GITHUB_ENV
+
       - name: Configure
         shell: pwsh
         run: >-
           cmake -B build-external -S external-summing-windows
           -G "Visual Studio 17 2022"
+          -A x64
           "-DJUCE_DIR=${{ github.workspace }}/external/JUCE"
           -DJUCE_COPY_PLUGIN_AFTER_BUILD=OFF
 
@@ -56,18 +66,27 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $packageDir = "package/windows"
-          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+          $packageName = "sommacampagna-external-$env:PACKAGE_VERSION-windows-x64"
+          $packageDir = "package/$packageName"
+          New-Item -ItemType Directory -Path "$packageDir/plugins" -Force | Out-Null
           Copy-Item "build-external/sommacampagna_engine_artefacts/Release/sommacampagna_engine.exe" $packageDir
-          Copy-Item "build-external/sommacampagna_sender_artefacts/Release/VST3/sommacampagna_sender.vst3" $packageDir -Recurse
-          Copy-Item "build-external/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3" $packageDir -Recurse
-          Compress-Archive -Path "$packageDir/*" -DestinationPath "package/sommacampagna-external-windows.zip"
+          Copy-Item "build-external/sommacampagna_sender_artefacts/Release/VST3/sommacampagna_sender.vst3" "$packageDir/plugins/sommacampagna_sender.vst3" -Recurse
+          Copy-Item "build-external/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3" "$packageDir/plugins/sommacampagna_receiver.vst3" -Recurse
+          Copy-Item "external-summing-windows/RELEASE-WINDOWS-README.md" "$packageDir/README.md"
+          Copy-Item "external-summing-windows/CHANGELOG.md" $packageDir
+          @(
+            "Version: $env:PACKAGE_VERSION"
+            "Commit: $env:GITHUB_SHA"
+            "JUCE: $env:JUCE_TAG"
+            "Platform: Windows x64"
+          ) | Set-Content "$packageDir/BUILD-INFO.txt"
+          Compress-Archive -Path $packageDir -DestinationPath "package/$packageName.zip"
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: sommacampagna-external-windows
-          path: package/sommacampagna-external-windows.zip
+          name: sommacampagna-external-windows-x64
+          path: package/sommacampagna-external-*-windows-x64.zip
           if-no-files-found: error
 
   macos:
@@ -86,6 +105,13 @@ jobs:
           ref: ${{ env.JUCE_TAG }}
           path: external/JUCE
           persist-credentials: false
+
+      - name: Read project version
+        shell: bash
+        run: |
+          PACKAGE_VERSION="$(sed -nE 's/^project\(SommacampagnaExternalSumming VERSION ([0-9]+\.[0-9]+\.[0-9]+)\)$/\1/p' external-summing-windows/CMakeLists.txt)"
+          test -n "$PACKAGE_VERSION"
+          echo "PACKAGE_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
 
       - name: Configure
         shell: bash
@@ -125,18 +151,87 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          package_dir="package/macos"
-          mkdir -p "$package_dir"
-          ditto "build-external-osx/sommacampagna_engine_artefacts/Release/sommacampagna_engine.app" "$package_dir/sommacampagna_engine.app"
-          ditto "build-external-osx/sommacampagna_sender_artefacts/Release/VST3/sommacampagna_sender.vst3" "$package_dir/sommacampagna_sender.vst3"
-          ditto "build-external-osx/sommacampagna_sender_au_artefacts/Release/AU/sommacampagna_sender.component" "$package_dir/sommacampagna_sender.component"
-          ditto "build-external-osx/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3" "$package_dir/sommacampagna_receiver.vst3"
-          ditto "build-external-osx/sommacampagna_receiver_au_artefacts/Release/AU/sommacampagna_receiver.component" "$package_dir/sommacampagna_receiver.component"
-          ditto -c -k --sequesterRsrc --keepParent "$package_dir" "package/sommacampagna-external-macos-universal.zip"
+          package_name="sommacampagna-external-${PACKAGE_VERSION}-macos-universal"
+          package_dir="package/${package_name}"
+          mkdir -p "$package_dir/Applications" "$package_dir/Plugins/VST3" "$package_dir/Plugins/Components"
+          ditto "build-external-osx/sommacampagna_engine_artefacts/Release/sommacampagna_engine.app" "$package_dir/Applications/sommacampagna_engine.app"
+          ditto "build-external-osx/sommacampagna_sender_artefacts/Release/VST3/sommacampagna_sender.vst3" "$package_dir/Plugins/VST3/sommacampagna_sender.vst3"
+          ditto "build-external-osx/sommacampagna_sender_au_artefacts/Release/AU/sommacampagna_sender.component" "$package_dir/Plugins/Components/sommacampagna_sender.component"
+          ditto "build-external-osx/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3" "$package_dir/Plugins/VST3/sommacampagna_receiver.vst3"
+          ditto "build-external-osx/sommacampagna_receiver_au_artefacts/Release/AU/sommacampagna_receiver.component" "$package_dir/Plugins/Components/sommacampagna_receiver.component"
+          cp "external-summing-windows/RELEASE-MACOS-README.md" "$package_dir/README.md"
+          cp "external-summing-windows/CHANGELOG.md" "$package_dir/CHANGELOG.md"
+          printf 'Version: %s\nCommit: %s\nJUCE: %s\nPlatform: macOS Universal (arm64, x86_64)\n' \
+            "$PACKAGE_VERSION" "$GITHUB_SHA" "$JUCE_TAG" > "$package_dir/BUILD-INFO.txt"
+          ditto -c -k --sequesterRsrc --keepParent "$package_dir" "package/${package_name}.zip"
 
       - name: Upload macOS package
         uses: actions/upload-artifact@v4
         with:
           name: sommacampagna-external-macos-universal
-          path: package/sommacampagna-external-macos-universal.zip
+          path: package/sommacampagna-external-*-macos-universal.zip
           if-no-files-found: error
+
+  release-draft:
+    name: Create draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Validate tag version
+        shell: bash
+        run: |
+          project_version="$(sed -nE 's/^project\(SommacampagnaExternalSumming VERSION ([0-9]+\.[0-9]+\.[0-9]+)\)$/\1/p' external-summing-windows/CMakeLists.txt)"
+          test -n "$project_version"
+          if [ "$GITHUB_REF_NAME" != "v${project_version}" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match CMake version v${project_version}." >&2
+            exit 1
+          fi
+          echo "PACKAGE_VERSION=$project_version" >> "$GITHUB_ENV"
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: package
+          merge-multiple: true
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          cd package
+          sha256sum ./*.zip > SHA256SUMS.txt
+
+      - name: Create or update draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          cat > "$notes_file" <<EOF
+          Prima preview multipiattaforma di sommacampagna external summing ${PACKAGE_VERSION}.
+
+          - Windows x64: engine e plugin VST3
+          - macOS Universal: engine, VST3 e AU per arm64 e x86_64
+
+          Prima di pubblicare la bozza completare i controlli in external-summing-windows/RELEASE.md, inclusi licenza, firma Windows, firma/notarizzazione macOS e test audio manuali.
+          EOF
+
+          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' >/dev/null 2>&1; then
+            is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')"
+            if [ "$is_draft" != "true" ]; then
+              echo "Release $GITHUB_REF_NAME is already published; refusing to replace its assets." >&2
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" package/*.zip package/SHA256SUMS.txt --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" package/*.zip package/SHA256SUMS.txt \
+              --draft \
+              --verify-tag \
+              --title "sommacampagna external ${PACKAGE_VERSION}" \
+              --notes-file "$notes_file"
+          fi

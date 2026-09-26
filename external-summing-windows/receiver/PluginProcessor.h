@@ -69,6 +69,8 @@ private:
     alignas(64) std::atomic<uint32_t> readPosition { 0 };
     bool playbackPrimed = false;
     uint32_t currentSampleRate = 48000;
+    double fractionalReadPhase = 0.0;
+    double clockCorrection = 0.0;
     float lastOutL = 0.0f;
     float lastOutR = 0.0f;
 

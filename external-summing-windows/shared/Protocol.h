@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -22,6 +23,38 @@ constexpr size_t maxBufferedFrames = 131072u;
 constexpr float minTransmissionBufferMs = 1.0f;
 constexpr float defaultTransmissionBufferMs = 50.0f;
 constexpr float maxTransmissionBufferMs = 500.0f;
+constexpr double maxClockCorrectionRatio = 0.005;
+constexpr double clockCorrectionDeadbandFrames = 16.0;
+constexpr double clockCorrectionProportionalGain = 0.00001;
+constexpr double clockCorrectionSmoothingSeconds = 0.5;
+
+inline double getClockCorrectionTarget(double occupancyErrorFrames) noexcept
+{
+    const auto magnitude = std::abs(occupancyErrorFrames);
+    if (magnitude <= clockCorrectionDeadbandFrames)
+        return 0.0;
+
+    const auto correctedError = std::copysign(magnitude - clockCorrectionDeadbandFrames, occupancyErrorFrames);
+    return std::clamp(correctedError * clockCorrectionProportionalGain,
+                      -maxClockCorrectionRatio,
+                      maxClockCorrectionRatio);
+}
+
+inline double smoothClockCorrection(double current,
+                                    double target,
+                                    uint32_t frames,
+                                    uint32_t sampleRate) noexcept
+{
+    if (sampleRate == 0)
+        return 0.0;
+
+    // First-order smoothing: c[n+1] = c[n] + min(dt/tau, 1) * (target - c[n]).
+    const auto alpha = std::clamp(static_cast<double>(frames)
+                                      / (static_cast<double>(sampleRate) * clockCorrectionSmoothingSeconds),
+                                  0.0,
+                                  1.0);
+    return current + alpha * (target - current);
+}
 
 enum class PacketType : uint16_t
 {
