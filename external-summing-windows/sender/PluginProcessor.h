@@ -8,6 +8,18 @@
 
 class SenderNetworkThread;
 
+struct SenderTransportStats
+{
+    uint32_t queueDepth = 0;
+    uint32_t queueHighWater = 0;
+    uint32_t droppedPackets = 0;
+    uint32_t droppedFrames = 0;
+    uint32_t packetsSent = 0;
+    uint32_t sendErrors = 0;
+    uint16_t targetPort = somma::senderToEnginePort;
+    bool workerRunning = false;
+};
+
 class SenderAudioProcessor final : public juce::AudioProcessor
 {
 public:
@@ -37,6 +49,8 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
+    SenderTransportStats getTransportStats() const noexcept;
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -55,6 +69,13 @@ private:
     std::array<somma::StereoAudioPacket, packetQueueCapacity> packetQueue {};
     alignas(64) std::atomic<uint32_t> packetWritePosition { 0 };
     alignas(64) std::atomic<uint32_t> packetReadPosition { 0 };
+    std::atomic<uint32_t> queueHighWater { 0 };
+    std::atomic<uint32_t> droppedPackets { 0 };
+    std::atomic<uint32_t> droppedFrames { 0 };
+    std::atomic<uint32_t> packetsSent { 0 };
+    std::atomic<uint32_t> sendErrors { 0 };
+    std::atomic<uint32_t> targetPort { somma::senderToEnginePort };
+    std::atomic<bool> workerRunning { false };
     std::unique_ptr<SenderNetworkThread> networkThread;
     uint32_t streamId = 0;
     uint32_t blockIndex = 0;

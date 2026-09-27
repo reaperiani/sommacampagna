@@ -27,8 +27,9 @@ public:
         uint16_t receivePort = 0;
         uint32_t lastPortPollMs = 0;
         uint32_t sessionId = 0;
-        uint32_t expectedBlock = 0;
-        bool haveSequence = false;
+        bool haveSession = false;
+        bool haveBufferConfig = false;
+        somma::BlockSequenceTracker sequence;
         std::array<char, somma::maximumInspectedDatagramSize> datagram;
         somma::StereoAudioPacket packet;
 
@@ -38,7 +39,10 @@ public:
             if (lastPortPollMs == 0 || (now - lastPortPollMs) > 500u)
             {
                 const auto config = somma::readPorts();
-                processor.transmissionBufferMs.store(config.transmissionBufferMs, std::memory_order_relaxed);
+                const auto previousBufferMs = processor.transmissionBufferMs.exchange(config.transmissionBufferMs, std::memory_order_relaxed);
+                if (haveBufferConfig && previousBufferMs != config.transmissionBufferMs)
+                    processor.resyncRequested.store(true, std::memory_order_release);
+                haveBufferConfig = true;
                 if (socket == nullptr || config.engineToReceiver != receivePort)
                 {
                     const bool replacingSocket = socket != nullptr;
@@ -48,7 +52,8 @@ public:
                     {
                         socket = std::move(replacement);
                         receivePort = config.engineToReceiver;
-                        haveSequence = false;
+                        sequence.reset();
+                        haveSession = false;
                         if (replacingSocket)
                         {
                             processor.resyncRequested.store(true, std::memory_order_release);
@@ -69,25 +74,49 @@ public:
                     if (received <= 0)
                         break;
 
-                    if (somma::decodeStereoAudioPacket(datagram.data(),
-                                                       static_cast<size_t>(received),
-                                                       somma::PacketType::mainStereoSum,
-                                                       packet)
-                        && packet.header.sampleRate == processor.currentSampleRate)
+                    if (!somma::decodeStereoAudioPacket(datagram.data(),
+                                                        static_cast<size_t>(received),
+                                                        somma::PacketType::mainStereoSum,
+                                                        packet))
                     {
-                        if (haveSequence
-                            && (packet.header.sessionId != sessionId || packet.header.blockIndex != expectedBlock))
+                        processor.invalidPackets.fetch_add(1u, std::memory_order_relaxed);
+                    }
+                    else if (packet.header.sampleRate != processor.currentSampleRate)
+                    {
+                        processor.wrongRatePackets.fetch_add(1u, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        if (haveSession && packet.header.sessionId != sessionId)
                         {
+                            processor.discontinuities.fetch_add(1u, std::memory_order_relaxed);
                             processor.resyncRequested.store(true, std::memory_order_release);
+                            sequence.reset();
                         }
 
-                        processor.pushPacket(packet);
                         sessionId = packet.header.sessionId;
-                        expectedBlock = packet.header.blockIndex + 1u;
-                        haveSequence = true;
-                        processor.lastBlockReceived.store(packet.header.blockIndex, std::memory_order_release);
-                        processor.lastReceiveTimeMs.store(now, std::memory_order_release);
-                        processor.connected.store(true, std::memory_order_release);
+                        haveSession = true;
+                        const auto sequenceStatus = sequence.observe(packet.header.blockIndex);
+                        bool acceptPacket = true;
+                        if (sequenceStatus == somma::BlockSequenceStatus::forwardGap
+                            || sequenceStatus == somma::BlockSequenceStatus::restart)
+                        {
+                            processor.discontinuities.fetch_add(1u, std::memory_order_relaxed);
+                            processor.resyncRequested.store(true, std::memory_order_release);
+                        }
+                        else if (sequenceStatus == somma::BlockSequenceStatus::stale)
+                        {
+                            processor.stalePackets.fetch_add(1u, std::memory_order_relaxed);
+                            acceptPacket = false;
+                        }
+
+                        if (acceptPacket)
+                        {
+                            processor.pushPacket(packet);
+                            processor.lastBlockReceived.store(packet.header.blockIndex, std::memory_order_release);
+                            processor.lastReceiveTimeMs.store(now, std::memory_order_release);
+                            processor.connected.store(true, std::memory_order_release);
+                        }
                     }
                     ++packetsRead;
                 }
@@ -103,7 +132,8 @@ public:
                 if (processor.connected.exchange(false, std::memory_order_acq_rel))
                 {
                     processor.resyncRequested.store(true, std::memory_order_release);
-                    haveSequence = false;
+                    sequence.reset();
+                    haveSession = false;
                 }
             }
         }
@@ -145,6 +175,18 @@ void ReceiverAudioProcessor::prepareToPlay(double sampleRate, int)
     lastReceiveTimeMs.store(0, std::memory_order_relaxed);
     connected.store(false, std::memory_order_relaxed);
     resyncRequested.store(false, std::memory_order_relaxed);
+    primedSnapshot.store(false, std::memory_order_relaxed);
+    occupancyFramesSnapshot.store(0, std::memory_order_relaxed);
+    targetFramesSnapshot.store(0, std::memory_order_relaxed);
+    clockCorrectionPpmSnapshot.store(0, std::memory_order_relaxed);
+    discontinuities.store(0, std::memory_order_relaxed);
+    stalePackets.store(0, std::memory_order_relaxed);
+    overflowPackets.store(0, std::memory_order_relaxed);
+    overflowFrames.store(0, std::memory_order_relaxed);
+    underflows.store(0, std::memory_order_relaxed);
+    resyncs.store(0, std::memory_order_relaxed);
+    invalidPackets.store(0, std::memory_order_relaxed);
+    wrongRatePackets.store(0, std::memory_order_relaxed);
     startNetworkThread();
 }
 
@@ -183,6 +225,8 @@ void ReceiverAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     auto availableFrames = write - read;
     if (!isConnected || shouldResync)
     {
+        if (shouldResync)
+            resyncs.fetch_add(1u, std::memory_order_relaxed);
         read = write;
         availableFrames = 0;
         playbackPrimed = false;
@@ -240,6 +284,7 @@ void ReceiverAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
                 playbackPrimed = false;
                 fractionalReadPhase = 0.0;
                 clockCorrection = 0.0;
+                underflows.fetch_add(1u, std::memory_order_relaxed);
             }
 
             lastOutL *= 0.985f;
@@ -253,6 +298,10 @@ void ReceiverAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     }
 
     readPosition.store(read, std::memory_order_release);
+    primedSnapshot.store(playbackPrimed, std::memory_order_relaxed);
+    occupancyFramesSnapshot.store(availableFrames, std::memory_order_relaxed);
+    targetFramesSnapshot.store(static_cast<uint32_t>(targetBufferFrames), std::memory_order_relaxed);
+    clockCorrectionPpmSnapshot.store(static_cast<int32_t>(std::lround(clockCorrection * 1000000.0)), std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* ReceiverAudioProcessor::createEditor()
@@ -305,6 +354,25 @@ float ReceiverAudioProcessor::getConnectedValue() const noexcept
     return connected.load(std::memory_order_acquire) ? 1.0f : 0.0f;
 }
 
+ReceiverTransportStats ReceiverAudioProcessor::getTransportStats() const noexcept
+{
+    return {
+        connected.load(std::memory_order_acquire),
+        primedSnapshot.load(std::memory_order_relaxed),
+        occupancyFramesSnapshot.load(std::memory_order_relaxed),
+        targetFramesSnapshot.load(std::memory_order_relaxed),
+        clockCorrectionPpmSnapshot.load(std::memory_order_relaxed),
+        discontinuities.load(std::memory_order_relaxed),
+        stalePackets.load(std::memory_order_relaxed),
+        overflowPackets.load(std::memory_order_relaxed),
+        overflowFrames.load(std::memory_order_relaxed),
+        underflows.load(std::memory_order_relaxed),
+        resyncs.load(std::memory_order_relaxed),
+        invalidPackets.load(std::memory_order_relaxed),
+        wrongRatePackets.load(std::memory_order_relaxed),
+    };
+}
+
 void ReceiverAudioProcessor::startNetworkThread()
 {
     networkThread = std::make_unique<ReceiverNetworkThread>(*this);
@@ -328,6 +396,8 @@ bool ReceiverAudioProcessor::pushPacket(const somma::StereoAudioPacket& packet) 
     const auto packetFrames = static_cast<uint32_t>(packet.header.numSamples);
     if (write - read + packetFrames > ringFrames)
     {
+        overflowPackets.fetch_add(1u, std::memory_order_relaxed);
+        overflowFrames.fetch_add(packetFrames, std::memory_order_relaxed);
         resyncRequested.store(true, std::memory_order_release);
         return false;
     }

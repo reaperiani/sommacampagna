@@ -64,6 +64,11 @@ jobs:
           sommacampagna_engine
           sommacampagna_sender_VST3
           sommacampagna_receiver_VST3
+          sommacampagna_transport_tests
+
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build-external --build-config Release --output-on-failure
 
       - name: Package
         shell: pwsh
@@ -76,6 +81,8 @@ jobs:
           Copy-Item "build-external/sommacampagna_receiver_artefacts/Release/VST3/sommacampagna_receiver.vst3" "$packageDir/plugins/sommacampagna_receiver.vst3" -Recurse
           Copy-Item "external-summing-windows/RELEASE-WINDOWS-README.md" "$packageDir/README.md"
           Copy-Item "external-summing-windows/CHANGELOG.md" $packageDir
+          Copy-Item "LICENSE" $packageDir
+          Copy-Item "THIRD_PARTY_NOTICES.md" $packageDir
           @(
             "Version: $env:PACKAGE_VERSION"
             "Commit: $env:GITHUB_SHA"
@@ -133,7 +140,12 @@ jobs:
             sommacampagna_sender_VST3 \
             sommacampagna_sender_au_AU \
             sommacampagna_receiver_VST3 \
-            sommacampagna_receiver_au_AU
+            sommacampagna_receiver_au_AU \
+            sommacampagna_transport_tests
+
+      - name: Test
+        shell: bash
+        run: ctest --test-dir build-external-osx --output-on-failure
 
       - name: Verify Universal binaries
         shell: bash
@@ -163,6 +175,8 @@ jobs:
           ditto "build-external-osx/sommacampagna_receiver_au_artefacts/Release/AU/sommacampagna_receiver.component" "$package_dir/Plugins/Components/sommacampagna_receiver.component"
           cp "external-summing-windows/RELEASE-MACOS-README.md" "$package_dir/README.md"
           cp "external-summing-windows/CHANGELOG.md" "$package_dir/CHANGELOG.md"
+          cp "LICENSE" "$package_dir/LICENSE"
+          cp "THIRD_PARTY_NOTICES.md" "$package_dir/THIRD_PARTY_NOTICES.md"
           cp "external-summing-windows/installer/macos/install-macos.command" "$package_dir/install-macos.command"
           cp "external-summing-windows/installer/macos/uninstall-macos.command" "$package_dir/uninstall-macos.command"
           chmod +x "$package_dir/install-macos.command" "$package_dir/uninstall-macos.command"
@@ -220,10 +234,13 @@ jobs:
         run: |
           notes_file="${RUNNER_TEMP}/release-notes.md"
           cat > "$notes_file" <<EOF
-          Prima preview multipiattaforma di sommacampagna external summing ${PACKAGE_VERSION}.
+          Sommacampagna external summing ${PACKAGE_VERSION}.
 
           - Windows x64: engine e plugin VST3
           - macOS Universal: engine, VST3 e AU per arm64 e x86_64, con installer e uninstaller utente
+          - Buffer totale configurabile, telemetria del trasporto e recovery per-stream
+          - Test deterministici del protocollo e della configurazione eseguiti in CI
+          - Sorgente corrispondente: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}
 
           Prima di pubblicare la bozza completare i controlli in external-summing-windows/RELEASE.md, inclusi licenza, firma Windows, firma/notarizzazione macOS e test audio manuali.
           EOF

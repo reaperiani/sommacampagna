@@ -35,3 +35,12 @@ Richiede Windows 10/11 x64 e Microsoft Visual C++ Redistributable 2015-2022 x64.
 - Engine, sender, receiver e DAW devono usare lo stesso sample rate.
 - Il percorso esterno aggiunge latenza e non comunica ancora la latenza alla DAW per la compensazione automatica.
 - Le preview non firmate possono mostrare avvisi SmartScreen. Verifica sempre checksum e provenienza dalla GitHub Release ufficiale.
+
+## Licenza e sorgente
+
+Sommacampagna e distribuito senza garanzia sotto GNU AGPL v3.0. Il codice
+sorgente corrispondente e disponibile su:
+
+https://github.com/reaperiani/sommacampagna
+
+Consulta `LICENSE` e `THIRD_PARTY_NOTICES.md` inclusi nel pacchetto.

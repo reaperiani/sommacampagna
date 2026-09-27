@@ -5,7 +5,9 @@ if(APPLE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
 endif()
 
-project(SommacampagnaExternalSumming VERSION 0.1.1)
+project(SommacampagnaExternalSumming VERSION 0.2.0)
+
+include(CTest)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -193,4 +195,25 @@ if(APPLE)
   target_link_libraries(sommacampagna_receiver_au PRIVATE
     juce::juce_audio_utils
   )
+endif()
+
+if(BUILD_TESTING)
+  add_executable(sommacampagna_transport_tests
+    tests/TransportTests.cpp
+  )
+
+  target_include_directories(sommacampagna_transport_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/shared
+  )
+
+  target_compile_definitions(sommacampagna_transport_tests PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+  )
+
+  target_link_libraries(sommacampagna_transport_tests PRIVATE
+    juce::juce_core
+  )
+
+  add_test(NAME sommacampagna_transport_tests COMMAND sommacampagna_transport_tests)
 endif()

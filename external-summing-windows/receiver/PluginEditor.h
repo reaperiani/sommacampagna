@@ -21,6 +21,7 @@ private:
 
     juce::Slider trimSlider;
     juce::Label statusLabel;
+    juce::Label diagnosticsLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> trimAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ReceiverAudioProcessorEditor)

@@ -27,7 +27,9 @@ public:
     void run() override
     {
         juce::DatagramSocket socket;
-        socket.bindToPort(0, "127.0.0.1");
+        if (!socket.bindToPort(0, "127.0.0.1"))
+            processor.sendErrors.fetch_add(1u, std::memory_order_relaxed);
+        processor.workerRunning.store(true, std::memory_order_release);
 
         uint16_t targetPort = somma::senderToEnginePort;
         uint32_t lastPortPollMs = 0;
@@ -38,6 +40,7 @@ public:
             if (lastPortPollMs == 0 || (now - lastPortPollMs) > 500u)
             {
                 targetPort = somma::readPorts().senderToEngine;
+                processor.targetPort.store(targetPort, std::memory_order_relaxed);
                 lastPortPollMs = now;
             }
 
@@ -46,16 +49,22 @@ public:
             while (packetsSent < 64 && processor.popPacket(packet))
             {
                 const auto bytesToSend = somma::getStereoAudioPacketSize(packet.header.numSamples);
-                socket.write("127.0.0.1",
-                             static_cast<int>(targetPort),
-                             reinterpret_cast<const char*>(&packet),
-                             static_cast<int>(bytesToSend));
+                const auto bytesWritten = socket.write("127.0.0.1",
+                                                       static_cast<int>(targetPort),
+                                                       reinterpret_cast<const char*>(&packet),
+                                                       static_cast<int>(bytesToSend));
+                if (bytesWritten == static_cast<int>(bytesToSend))
+                    processor.packetsSent.fetch_add(1u, std::memory_order_relaxed);
+                else
+                    processor.sendErrors.fetch_add(1u, std::memory_order_relaxed);
                 ++packetsSent;
             }
 
             if (packetsSent == 0)
                 juce::Thread::sleep(1);
         }
+
+        processor.workerRunning.store(false, std::memory_order_release);
     }
 
 private:
@@ -82,9 +91,15 @@ void SenderAudioProcessor::prepareToPlay(double sampleRate, int)
                                  ? static_cast<uint32_t>(std::lround(sampleRate))
                                  : 0u;
     currentSampleRate = somma::isSupportedSampleRate(roundedSampleRate) ? roundedSampleRate : 48000u;
-    blockIndex = 0;
     packetReadPosition.store(0, std::memory_order_relaxed);
     packetWritePosition.store(0, std::memory_order_relaxed);
+    queueHighWater.store(0, std::memory_order_relaxed);
+    droppedPackets.store(0, std::memory_order_relaxed);
+    droppedFrames.store(0, std::memory_order_relaxed);
+    packetsSent.store(0, std::memory_order_relaxed);
+    sendErrors.store(0, std::memory_order_relaxed);
+    targetPort.store(somma::senderToEnginePort, std::memory_order_relaxed);
+    workerRunning.store(false, std::memory_order_relaxed);
     startNetworkThread();
 }
 
@@ -134,16 +149,21 @@ void SenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     for (int offset = 0; offset < blockSamples; offset += somma::maxSamplesPerPacket)
     {
         const int packetSamples = juce::jmin(somma::maxSamplesPerPacket, blockSamples - offset);
+        const auto packetBlockIndex = blockIndex++;
         auto* packet = beginPacket();
         if (packet == nullptr)
+        {
+            droppedPackets.fetch_add(1u, std::memory_order_relaxed);
+            droppedFrames.fetch_add(static_cast<uint32_t>(packetSamples), std::memory_order_relaxed);
             continue;
+        }
 
         packet->header.magic = somma::protocolMagic;
         packet->header.version = somma::protocolVersion;
         packet->header.packetType = static_cast<uint16_t>(somma::PacketType::senderAudio);
         packet->header.sessionId = 1;
         packet->header.streamId = streamId;
-        packet->header.blockIndex = blockIndex++;
+        packet->header.blockIndex = packetBlockIndex;
         packet->header.sampleRate = currentSampleRate;
         packet->header.numSamples = static_cast<uint16_t>(packetSamples);
         packet->header.pairIndex = static_cast<uint16_t>(pairIndex);
@@ -190,6 +210,14 @@ void SenderAudioProcessor::commitPacket() noexcept
 {
     const auto writePosition = packetWritePosition.load(std::memory_order_relaxed);
     packetWritePosition.store(writePosition + 1u, std::memory_order_release);
+
+    const auto readPosition = packetReadPosition.load(std::memory_order_acquire);
+    const auto depth = writePosition + 1u - readPosition;
+    auto highWater = queueHighWater.load(std::memory_order_relaxed);
+    while (depth > highWater
+           && !queueHighWater.compare_exchange_weak(highWater, depth, std::memory_order_relaxed))
+    {
+    }
 }
 
 bool SenderAudioProcessor::popPacket(somma::StereoAudioPacket& packet) noexcept
@@ -202,6 +230,22 @@ bool SenderAudioProcessor::popPacket(somma::StereoAudioPacket& packet) noexcept
     packet = packetQueue[readPosition % packetQueueCapacity];
     packetReadPosition.store(readPosition + 1u, std::memory_order_release);
     return true;
+}
+
+SenderTransportStats SenderAudioProcessor::getTransportStats() const noexcept
+{
+    const auto read = packetReadPosition.load(std::memory_order_acquire);
+    const auto write = packetWritePosition.load(std::memory_order_acquire);
+    return {
+        juce::jmin(write - read, packetQueueCapacity),
+        queueHighWater.load(std::memory_order_relaxed),
+        droppedPackets.load(std::memory_order_relaxed),
+        droppedFrames.load(std::memory_order_relaxed),
+        packetsSent.load(std::memory_order_relaxed),
+        sendErrors.load(std::memory_order_relaxed),
+        static_cast<uint16_t>(targetPort.load(std::memory_order_relaxed)),
+        workerRunning.load(std::memory_order_acquire),
+    };
 }
 
 juce::AudioProcessorEditor* SenderAudioProcessor::createEditor()

@@ -4,7 +4,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
 
-class SenderAudioProcessorEditor final : public juce::AudioProcessorEditor
+class SenderAudioProcessorEditor final : public juce::AudioProcessorEditor,
+                                         private juce::Timer
 {
 public:
     explicit SenderAudioProcessorEditor(SenderAudioProcessor&);
@@ -14,11 +15,14 @@ public:
     void resized() override;
 
 private:
+    void timerCallback() override;
+
     SenderAudioProcessor& processor;
 
     juce::ComboBox pairBox;
     juce::Slider gainSlider;
     juce::ToggleButton bypassButton;
+    juce::Label statusLabel;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> pairAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment;

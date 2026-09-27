@@ -9,22 +9,25 @@ This is a new, isolated project folder that leaves the original multichannel VST
   - stereo send
   - target pair selector (`Pair 1..8`)
   - pre-send gain (`-60 dB .. +12 dB`)
+  - local queue and UDP diagnostics
 - `sommacampagna_receiver.vst3`: receiver plugin
   - returns main stereo sum from engine by default
   - output trim
-  - connection status in UI
+  - connection and transport diagnostics in UI
 
 ## Important MVP notes
 
 - Transport is localhost UDP only (`127.0.0.1`).
-- This is a functional MVP skeleton.
-- Engine currently forwards the latest sender block to main sum output.
-  - Next iteration should accumulate multiple concurrent sender streams by `sessionId` + `pairIndex`.
+- The engine accumulates concurrent sender streams into eight stereo pairs and processes their sum.
+- Sender and receiver networking runs on dedicated worker threads.
+- The total buffer target is split between the engine and receiver; changes apply after sender streams stop.
+- Real-time playback is supported; faster-than-real-time/offline bounce is not guaranteed.
 
 ## Ports
 
-- Sender -> Engine: `45570`
-- Engine -> Receiver: `45571`
+- Sender -> Engine default: `45570`
+- Engine -> Receiver default: `45571`
+- Runtime ports and the buffer allocation are published through the shared discovery file.
 
 ## Build (Windows)
 
@@ -33,6 +36,8 @@ cmake -B build-external -S external-summing-windows -G "Visual Studio 17 2022" -
 cmake --build build-external --config Release --target sommacampagna_engine
 cmake --build build-external --config Release --target sommacampagna_sender_VST3
 cmake --build build-external --config Release --target sommacampagna_receiver_VST3
+cmake --build build-external --config Release --target sommacampagna_transport_tests
+ctest --test-dir build-external --build-config Release --output-on-failure
 ```
 
 ## Quick run

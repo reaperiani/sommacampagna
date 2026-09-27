@@ -9,6 +9,23 @@
 
 class ReceiverNetworkThread;
 
+struct ReceiverTransportStats
+{
+    bool connected = false;
+    bool primed = false;
+    uint32_t occupancyFrames = 0;
+    uint32_t targetFrames = 0;
+    int32_t clockCorrectionPpm = 0;
+    uint32_t discontinuities = 0;
+    uint32_t stalePackets = 0;
+    uint32_t overflowPackets = 0;
+    uint32_t overflowFrames = 0;
+    uint32_t underflows = 0;
+    uint32_t resyncs = 0;
+    uint32_t invalidPackets = 0;
+    uint32_t wrongRatePackets = 0;
+};
+
 class ReceiverAudioProcessor final : public juce::AudioProcessor
 {
 public:
@@ -39,6 +56,7 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     float getConnectedValue() const noexcept;
+    ReceiverTransportStats getTransportStats() const noexcept;
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -56,6 +74,18 @@ private:
     std::atomic<uint32_t> lastReceiveTimeMs { 0 };
     std::atomic<bool> connected { false };
     std::atomic<bool> resyncRequested { false };
+    std::atomic<bool> primedSnapshot { false };
+    std::atomic<uint32_t> occupancyFramesSnapshot { 0 };
+    std::atomic<uint32_t> targetFramesSnapshot { 0 };
+    std::atomic<int32_t> clockCorrectionPpmSnapshot { 0 };
+    std::atomic<uint32_t> discontinuities { 0 };
+    std::atomic<uint32_t> stalePackets { 0 };
+    std::atomic<uint32_t> overflowPackets { 0 };
+    std::atomic<uint32_t> overflowFrames { 0 };
+    std::atomic<uint32_t> underflows { 0 };
+    std::atomic<uint32_t> resyncs { 0 };
+    std::atomic<uint32_t> invalidPackets { 0 };
+    std::atomic<uint32_t> wrongRatePackets { 0 };
 
     static constexpr size_t ringFrames = somma::maxBufferedFrames;
     static_assert(ringFrames < (1u << 31u));

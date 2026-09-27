@@ -18,10 +18,11 @@ replacement for, The Analog Molecule.
   - stereo send
   - target pair selector (`Pair 1..8`)
   - pre-send gain (`-60 dB .. +12 dB`)
+  - queue depth, packet-drop, and UDP error diagnostics
 - `sommacampagna_receiver`: receiver plugin (VST3 on Windows/macOS, AU on macOS)
   - returns main stereo sum from engine by default
   - output trim
-  - connection status in UI
+  - connection, buffering, discontinuity, and underrun status in UI
 
 ## Important MVP notes
 
@@ -29,10 +30,25 @@ replacement for, The Analog Molecule.
 - The engine accumulates concurrent sender streams and processes their stereo sum.
 - Sender and receiver networking runs on dedicated worker threads rather than DAW audio callbacks.
 - Real-time playback is supported; faster-than-real-time/offline bounce is not yet guaranteed.
-- Packet loss and reordering trigger receiver re-synchronization.
+- Sender queue loss, UDP gaps, restarts, and reordering are detected; only the affected engine stream is re-primed.
+- Engine output loss and reordering trigger receiver re-synchronization.
 - Engine and receiver apply bounded clock-drift correction while keeping the configured buffer target.
 - Engine, sender, receiver, and DAW must use the same sample rate.
 - The external path adds buffering latency that is not yet reported to the DAW for plug-in delay compensation.
+
+## Total buffer target
+
+The engine exposes one total transport-buffer target from `20` to `500 ms`.
+A fresh installation defaults to `50 ms`, allocated approximately `60%` to
+sender-to-engine buffering and `40%` to engine-to-receiver buffering. Fixed
+engine and DAW block sizes can raise the effective minimum above the requested
+target.
+
+Buffer changes remain pending while sender streams are active and apply after
+playback stops and the streams time out. Existing discovery files that contain
+only the old per-stage value are migrated by doubling it and clamping it to the
+new total range. The engine, sender, and receiver UIs expose local
+transport counters so low settings can be evaluated rather than guessed.
 
 ## Ports
 
@@ -47,10 +63,15 @@ cmake -B build-external -S external-summing-windows -G "Visual Studio 17 2022" -
 cmake --build build-external --config Release --target sommacampagna_engine
 cmake --build build-external --config Release --target sommacampagna_sender_VST3
 cmake --build build-external --config Release --target sommacampagna_receiver_VST3
+cmake --build build-external --config Release --target sommacampagna_transport_tests
+ctest --test-dir build-external --build-config Release --output-on-failure
 ```
 
 For Universal macOS VST3/AU builds, see [`BUILD-OSX.md`](BUILD-OSX.md).
 Release packaging and publication gates are documented in [`RELEASE.md`](RELEASE.md).
+
+The project is distributed under the GNU Affero General Public License v3.0;
+see the repository `LICENSE` and `THIRD_PARTY_NOTICES.md` files.
 
 ## Quick run
 

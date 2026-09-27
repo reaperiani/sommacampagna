@@ -23,6 +23,10 @@ constexpr size_t maxBufferedFrames = 131072u;
 constexpr float minTransmissionBufferMs = 1.0f;
 constexpr float defaultTransmissionBufferMs = 50.0f;
 constexpr float maxTransmissionBufferMs = 500.0f;
+constexpr float minTotalTransmissionBufferMs = 20.0f;
+constexpr float defaultTotalTransmissionBufferMs = 50.0f;
+constexpr float maxTotalTransmissionBufferMs = 500.0f;
+constexpr float engineTransmissionBufferShare = 0.6f;
 constexpr double maxClockCorrectionRatio = 0.005;
 constexpr double clockCorrectionDeadbandFrames = 16.0;
 constexpr double clockCorrectionProportionalGain = 0.00001;
@@ -55,6 +59,60 @@ inline double smoothClockCorrection(double current,
                                   1.0);
     return current + alpha * (target - current);
 }
+
+enum class BlockSequenceStatus
+{
+    first,
+    inOrder,
+    forwardGap,
+    stale,
+    restart,
+};
+
+class BlockSequenceTracker
+{
+public:
+    BlockSequenceStatus observe(uint32_t blockIndex, bool allowZeroRestart = true) noexcept
+    {
+        if (!haveSequence)
+        {
+            haveSequence = true;
+            expectedBlock = blockIndex + 1u;
+            return BlockSequenceStatus::first;
+        }
+
+        if (blockIndex == expectedBlock)
+        {
+            expectedBlock = blockIndex + 1u;
+            return BlockSequenceStatus::inOrder;
+        }
+
+        if (allowZeroRestart && blockIndex == 0u && expectedBlock != 1u)
+        {
+            expectedBlock = 1u;
+            return BlockSequenceStatus::restart;
+        }
+
+        const auto distance = blockIndex - expectedBlock;
+        if (distance < 0x80000000u)
+        {
+            expectedBlock = blockIndex + 1u;
+            return BlockSequenceStatus::forwardGap;
+        }
+
+        return BlockSequenceStatus::stale;
+    }
+
+    void reset() noexcept
+    {
+        haveSequence = false;
+        expectedBlock = 0;
+    }
+
+private:
+    uint32_t expectedBlock = 0;
+    bool haveSequence = false;
+};
 
 enum class PacketType : uint16_t
 {

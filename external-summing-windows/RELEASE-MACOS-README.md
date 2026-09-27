@@ -60,3 +60,12 @@ Per rimuovere anche il file di discovery/configurazione usa `bash uninstall-maco
 - Il percorso esterno aggiunge latenza e non comunica ancora la latenza alla DAW per la compensazione automatica.
 - File porte: `~/Library/sommacampagna/udp-ports.txt`.
 - Le preview non firmate o non notarizzate possono essere bloccate da Gatekeeper. Non rimuovere la quarantena su file di provenienza non verificata.
+
+## Licenza e sorgente
+
+Sommacampagna e distribuito senza garanzia sotto GNU AGPL v3.0. Il codice
+sorgente corrispondente e disponibile su:
+
+https://github.com/reaperiani/sommacampagna
+
+Consulta `LICENSE` e `THIRD_PARTY_NOTICES.md` inclusi nel pacchetto.
