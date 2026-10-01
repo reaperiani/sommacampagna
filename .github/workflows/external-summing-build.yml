@@ -238,8 +238,9 @@ jobs:
 
           - Windows x64: engine e plugin VST3
           - macOS Universal: engine, VST3 e AU per arm64 e x86_64, con installer e uninstaller utente
-          - Buffer totale configurabile, telemetria del trasporto e recovery per-stream
-          - Test deterministici del protocollo e della configurazione eseguiti in CI
+          - Trasporto PCM float32 locale con allineamento di tutti i sender sul sample position della DAW
+          - Nessuna correzione di velocità, interpolazione o conversione di sample rate
+          - Test deterministici di protocollo, campioni PCM e sincronizzazione eseguiti in CI
           - Sorgente corrispondente: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}
 
           Prima di pubblicare la bozza completare i controlli in external-summing-windows/RELEASE.md, inclusi licenza, firma Windows, firma/notarizzazione macOS e test audio manuali.

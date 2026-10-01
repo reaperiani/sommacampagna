@@ -56,6 +56,9 @@ Per rimuovere anche il file di discovery/configurazione usa `bash uninstall-maco
 ## Note
 
 - Il sender muta il segnale post-invio per evitare il doppio audio.
+- Il trasporto è PCM float32 non compresso su localhost; ogni pacchetto è marcato con la posizione in campioni della DAW e tutte le coppie sono sommate sullo stesso frame.
+- L'host deve fornire la posizione in campioni tramite playhead. Non vengono applicati resampling, interpolazione o correzioni di velocità; i pacchetti senza timestamp valido sono rifiutati.
+- Engine, sender e receiver devono essere tutti della stessa versione v0.3.0: il protocollo audio è stato aggiornato alla versione 2.
 - Engine, sender, receiver e DAW devono usare lo stesso sample rate.
 - Il percorso esterno aggiunge latenza e non comunica ancora la latenza alla DAW per la compensazione automatica.
 - File porte: `~/Library/sommacampagna/udp-ports.txt`.

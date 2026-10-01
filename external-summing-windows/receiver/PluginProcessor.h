@@ -15,7 +15,6 @@ struct ReceiverTransportStats
     bool primed = false;
     uint32_t occupancyFrames = 0;
     uint32_t targetFrames = 0;
-    int32_t clockCorrectionPpm = 0;
     uint32_t discontinuities = 0;
     uint32_t stalePackets = 0;
     uint32_t overflowPackets = 0;
@@ -24,6 +23,7 @@ struct ReceiverTransportStats
     uint32_t resyncs = 0;
     uint32_t invalidPackets = 0;
     uint32_t wrongRatePackets = 0;
+    uint32_t untimedPackets = 0;
 };
 
 class ReceiverAudioProcessor final : public juce::AudioProcessor
@@ -77,7 +77,6 @@ private:
     std::atomic<bool> primedSnapshot { false };
     std::atomic<uint32_t> occupancyFramesSnapshot { 0 };
     std::atomic<uint32_t> targetFramesSnapshot { 0 };
-    std::atomic<int32_t> clockCorrectionPpmSnapshot { 0 };
     std::atomic<uint32_t> discontinuities { 0 };
     std::atomic<uint32_t> stalePackets { 0 };
     std::atomic<uint32_t> overflowPackets { 0 };
@@ -86,6 +85,7 @@ private:
     std::atomic<uint32_t> resyncs { 0 };
     std::atomic<uint32_t> invalidPackets { 0 };
     std::atomic<uint32_t> wrongRatePackets { 0 };
+    std::atomic<uint32_t> untimedPackets { 0 };
 
     static constexpr size_t ringFrames = somma::maxBufferedFrames;
     static_assert(ringFrames < (1u << 31u));
@@ -99,10 +99,6 @@ private:
     alignas(64) std::atomic<uint32_t> readPosition { 0 };
     bool playbackPrimed = false;
     uint32_t currentSampleRate = 48000;
-    double fractionalReadPhase = 0.0;
-    double clockCorrection = 0.0;
-    float lastOutL = 0.0f;
-    float lastOutR = 0.0f;
 
     size_t getTargetBufferFrames(int blockSamples) const noexcept;
 

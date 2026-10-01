@@ -27,12 +27,15 @@ replacement for, The Analog Molecule.
 ## Important MVP notes
 
 - Transport is localhost UDP only (`127.0.0.1`).
+- Audio is uncompressed interleaved float32 PCM; no Internet connection, codec, or sample-rate conversion is used.
 - The engine accumulates concurrent sender streams and processes their stereo sum.
+- Each packet carries the DAW sample position. The engine sums every sender against one shared sample-frame timeline, so Pair 1 and Pair 2 cannot acquire independent playback rates or buffer offsets.
 - Sender and receiver networking runs on dedicated worker threads rather than DAW audio callbacks.
 - Real-time playback is supported; faster-than-real-time/offline bounce is not yet guaranteed.
-- Sender queue loss, UDP gaps, restarts, and reordering are detected; only the affected engine stream is re-primed.
+- Sender queue loss, UDP gaps, restarts, and reordering are detected; missing frames remain silence at their original positions, and transport jumps re-prime the shared mix timeline.
 - Engine output loss and reordering trigger receiver re-synchronization.
-- Engine and receiver apply bounded clock-drift correction while keeping the configured buffer target.
+- No clock-drift speed correction, resampling, or interpolation is applied. The engine processes input frame blocks as they arrive, and the receiver consumes exactly one queued frame per DAW output frame.
+- A host must provide a valid sample position through JUCE's playhead API; untimed packets are rejected rather than mixed at an estimated offset.
 - Engine, sender, receiver, and DAW must use the same sample rate.
 - The external path adds buffering latency that is not yet reported to the DAW for plug-in delay compensation.
 

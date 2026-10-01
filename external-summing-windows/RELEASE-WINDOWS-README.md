@@ -31,6 +31,9 @@ Richiede Windows 10/11 x64 e Microsoft Visual C++ Redistributable 2015-2022 x64.
 
 - Il sender muta il segnale post-invio (niente doppio audio).
 - Engine, sender e receiver si sincronizzano via file porte UDP condiviso.
+- Il trasporto è PCM float32 non compresso su localhost; ogni pacchetto è marcato con la posizione in campioni della DAW e tutte le coppie sono sommate sullo stesso frame.
+- L'host deve fornire la posizione in campioni tramite playhead. Non vengono applicati resampling, interpolazione o correzioni di velocità; i pacchetti senza timestamp valido sono rifiutati.
+- Engine, sender e receiver devono essere tutti della stessa versione v0.3.0: il protocollo audio è stato aggiornato alla versione 2.
 - File porte: `%APPDATA%\sommacampagna\udp-ports.txt`
 - Engine, sender, receiver e DAW devono usare lo stesso sample rate.
 - Il percorso esterno aggiunge latenza e non comunica ancora la latenza alla DAW per la compensazione automatica.

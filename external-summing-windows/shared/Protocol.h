@@ -6,12 +6,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <type_traits>
 
 namespace somma
 {
 constexpr uint32_t protocolMagic = 0x534F4D4Du; // SOMM
-constexpr uint16_t protocolVersion = 1;
+constexpr uint16_t protocolVersion = 2;
 
 constexpr uint16_t senderToEnginePort = 45570;
 constexpr uint16_t engineToReceiverPort = 45571;
@@ -27,38 +28,164 @@ constexpr float minTotalTransmissionBufferMs = 20.0f;
 constexpr float defaultTotalTransmissionBufferMs = 50.0f;
 constexpr float maxTotalTransmissionBufferMs = 500.0f;
 constexpr float engineTransmissionBufferShare = 0.6f;
-constexpr double maxClockCorrectionRatio = 0.005;
-constexpr double clockCorrectionDeadbandFrames = 16.0;
-constexpr double clockCorrectionProportionalGain = 0.00001;
-constexpr double clockCorrectionSmoothingSeconds = 0.5;
+constexpr int64_t invalidSamplePosition = std::numeric_limits<int64_t>::min();
 
-inline double getClockCorrectionTarget(double occupancyErrorFrames) noexcept
+inline bool isValidSamplePosition(int64_t samplePosition) noexcept
 {
-    const auto magnitude = std::abs(occupancyErrorFrames);
-    if (magnitude <= clockCorrectionDeadbandFrames)
-        return 0.0;
-
-    const auto correctedError = std::copysign(magnitude - clockCorrectionDeadbandFrames, occupancyErrorFrames);
-    return std::clamp(correctedError * clockCorrectionProportionalGain,
-                      -maxClockCorrectionRatio,
-                      maxClockCorrectionRatio);
+    return samplePosition != invalidSamplePosition;
 }
 
-inline double smoothClockCorrection(double current,
-                                    double target,
-                                    uint32_t frames,
-                                    uint32_t sampleRate) noexcept
+inline bool addSampleFrames(int64_t samplePosition, uint32_t frames, int64_t& result) noexcept
 {
-    if (sampleRate == 0)
-        return 0.0;
+    if (!isValidSamplePosition(samplePosition)
+        || samplePosition > std::numeric_limits<int64_t>::max() - static_cast<int64_t>(frames))
+    {
+        return false;
+    }
 
-    // First-order smoothing: c[n+1] = c[n] + min(dt/tau, 1) * (target - c[n]).
-    const auto alpha = std::clamp(static_cast<double>(frames)
-                                      / (static_cast<double>(sampleRate) * clockCorrectionSmoothingSeconds),
-                                  0.0,
-                                  1.0);
-    return current + alpha * (target - current);
+    result = samplePosition + static_cast<int64_t>(frames);
+    return true;
 }
+
+class TimelineStereoBuffer
+{
+public:
+    enum class ReadResult
+    {
+        beforeStream,
+        available,
+        unavailable,
+    };
+
+    void clear() noexcept
+    {
+        readPosition = 0;
+        availableFrames = 0;
+        firstSamplePosition = invalidSamplePosition;
+        readSamplePosition = invalidSamplePosition;
+        writeSamplePosition = invalidSamplePosition;
+    }
+
+    bool append(int64_t packetSamplePosition,
+                const float* interleaved,
+                uint16_t numSamples,
+                bool& timelineDiscontinuity) noexcept
+    {
+        timelineDiscontinuity = false;
+        if (!isValidSamplePosition(packetSamplePosition) || interleaved == nullptr || numSamples == 0)
+            return false;
+
+        int64_t packetEnd = 0;
+        if (!addSampleFrames(packetSamplePosition, numSamples, packetEnd))
+            return false;
+
+        if (firstSamplePosition == invalidSamplePosition)
+        {
+            firstSamplePosition = packetSamplePosition;
+            readSamplePosition = packetSamplePosition;
+            writeSamplePosition = packetSamplePosition;
+        }
+        else if (packetSamplePosition < writeSamplePosition)
+        {
+            clear();
+            firstSamplePosition = packetSamplePosition;
+            readSamplePosition = packetSamplePosition;
+            writeSamplePosition = packetSamplePosition;
+            timelineDiscontinuity = true;
+        }
+
+        const auto gapFrames = packetSamplePosition > writeSamplePosition
+                                 ? static_cast<uint64_t>(packetSamplePosition) - static_cast<uint64_t>(writeSamplePosition)
+                                 : 0u;
+        if (gapFrames > maxBufferedFrames
+            || static_cast<size_t>(gapFrames) + numSamples > maxBufferedFrames - availableFrames)
+        {
+            clear();
+            firstSamplePosition = packetSamplePosition;
+            readSamplePosition = packetSamplePosition;
+            writeSamplePosition = packetSamplePosition;
+            timelineDiscontinuity = true;
+        }
+        else
+        {
+            for (uint64_t i = 0; i < gapFrames; ++i)
+                pushFrame(0.0f, 0.0f);
+        }
+
+        for (uint16_t i = 0; i < numSamples; ++i)
+            pushFrame(interleaved[static_cast<size_t>(i) * 2u], interleaved[static_cast<size_t>(i) * 2u + 1u]);
+
+        return true;
+    }
+
+    bool canReadRange(int64_t rangeStart, uint32_t numSamples) const noexcept
+    {
+        if (firstSamplePosition == invalidSamplePosition)
+            return false;
+
+        int64_t rangeEnd = 0;
+        if (!addSampleFrames(rangeStart, numSamples, rangeEnd))
+            return false;
+
+        if (rangeEnd <= firstSamplePosition)
+            return true;
+
+        const auto firstRequiredSample = maxSamplePosition(rangeStart, firstSamplePosition);
+        return firstRequiredSample >= readSamplePosition && rangeEnd <= writeSamplePosition;
+    }
+
+    ReadResult readAt(int64_t samplePosition, float& left, float& right) noexcept
+    {
+        left = 0.0f;
+        right = 0.0f;
+        if (firstSamplePosition == invalidSamplePosition)
+            return ReadResult::unavailable;
+        if (samplePosition < firstSamplePosition)
+            return ReadResult::beforeStream;
+        if (samplePosition < readSamplePosition || samplePosition >= writeSamplePosition)
+            return ReadResult::unavailable;
+
+        while (readSamplePosition < samplePosition)
+            discardFrame();
+
+        left = ringL[readPosition];
+        right = ringR[readPosition];
+        discardFrame();
+        return ReadResult::available;
+    }
+
+    size_t getAvailableFrames() const noexcept { return availableFrames; }
+    int64_t getFirstSamplePosition() const noexcept { return firstSamplePosition; }
+    int64_t getReadSamplePosition() const noexcept { return readSamplePosition; }
+    int64_t getWriteSamplePosition() const noexcept { return writeSamplePosition; }
+
+private:
+    static int64_t maxSamplePosition(int64_t a, int64_t b) noexcept { return a > b ? a : b; }
+
+    void pushFrame(float left, float right) noexcept
+    {
+        const auto writePosition = (readPosition + availableFrames) % maxBufferedFrames;
+        ringL[writePosition] = left;
+        ringR[writePosition] = right;
+        ++availableFrames;
+        ++writeSamplePosition;
+    }
+
+    void discardFrame() noexcept
+    {
+        readPosition = (readPosition + 1u) % maxBufferedFrames;
+        --availableFrames;
+        ++readSamplePosition;
+    }
+
+    std::array<float, maxBufferedFrames> ringL {};
+    std::array<float, maxBufferedFrames> ringR {};
+    size_t readPosition = 0;
+    size_t availableFrames = 0;
+    int64_t firstSamplePosition = invalidSamplePosition;
+    int64_t readSamplePosition = invalidSamplePosition;
+    int64_t writeSamplePosition = invalidSamplePosition;
+};
 
 enum class BlockSequenceStatus
 {
@@ -128,6 +255,7 @@ struct PacketHeader
     uint32_t sessionId = 0;
     uint32_t streamId = 0;
     uint32_t blockIndex = 0;
+    int64_t firstSamplePosition = 0;
     uint32_t sampleRate = 48000;
     uint16_t numSamples = 0;
     uint16_t pairIndex = 0;
@@ -150,7 +278,10 @@ static_assert(std::is_standard_layout_v<PacketHeader>);
 static_assert(std::is_trivially_copyable_v<PacketHeader>);
 static_assert(std::is_standard_layout_v<StereoAudioPacket>);
 static_assert(std::is_trivially_copyable_v<StereoAudioPacket>);
-static_assert(sizeof(PacketHeader) == 28u);
+static_assert(sizeof(PacketHeader) == 40u);
+static_assert(offsetof(PacketHeader, firstSamplePosition) == 24u);
+static_assert(offsetof(PacketHeader, sampleRate) == 32u);
+static_assert(offsetof(PacketHeader, numSamples) == 36u);
 static_assert(offsetof(StereoAudioPacket, interleaved) == sizeof(PacketHeader));
 static_assert(sizeof(StereoAudioPacket) == sizeof(PacketHeader) + sizeof(float) * maxSamplesPerPacket * 2u);
 

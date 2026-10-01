@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Aggiunta la posizione assoluta in campioni della DAW a ogni pacchetto audio (protocollo v2) e la somma usa un unico cursore temporale condiviso tra tutti i sender.
+- Rimossa la correzione di clock che variava la velocità e la lettura interpolata del receiver: ogni frame viene consumato una sola volta, senza resampling o time-stretch.
+- Il motore processa blocchi in base ai frame effettivamente ricevuti, non a un timer indipendente; i buffer stabiliscono la latenza e non il BPM.
+- I frame mancanti restano silenzio nella loro posizione temporale e le discontinuità sono esposte nella diagnostica, senza riallineare o accelerare stream singoli.
+- I sender richiedono al plug-in host la posizione in campioni; i pacchetti senza una posizione valida vengono rifiutati per non sommare tracce non sincronizzate.
+- Aggiunti test su payload PCM esatto, posizioni DAW condivise e mantenimento dei gap senza spostare i frame successivi.
+
 ## 0.2.0
 
 - Sostituito il buffer per-stage con un unico target totale, ripartito tra engine e receiver e compatibile con i file discovery precedenti.

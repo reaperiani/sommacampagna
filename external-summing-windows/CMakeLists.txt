@@ -5,7 +5,7 @@ if(APPLE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
 endif()
 
-project(SommacampagnaExternalSumming VERSION 0.2.0)
+project(SommacampagnaExternalSumming VERSION 0.3.0)
 
 include(CTest)
 

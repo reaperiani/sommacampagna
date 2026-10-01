@@ -100,6 +100,7 @@ void SenderAudioProcessor::prepareToPlay(double sampleRate, int)
     sendErrors.store(0, std::memory_order_relaxed);
     targetPort.store(somma::senderToEnginePort, std::memory_order_relaxed);
     workerRunning.store(false, std::memory_order_relaxed);
+    timelinePositionAvailable.store(false, std::memory_order_relaxed);
     startNetworkThread();
 }
 
@@ -118,8 +119,6 @@ bool SenderAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) co
 
 void SenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
-    juce::ScopedNoDenormals noDenormals;
-
     auto muteOutput = [&buffer]()
     {
         for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
@@ -128,6 +127,7 @@ void SenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
 
     if (buffer.getNumChannels() < 2)
     {
+        timelinePositionAvailable.store(false, std::memory_order_relaxed);
         muteOutput();
         return;
     }
@@ -135,6 +135,7 @@ void SenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     const bool bypass = apvts.getRawParameterValue(paramBypass)->load() > 0.5f;
     if (bypass)
     {
+        timelinePositionAvailable.store(false, std::memory_order_relaxed);
         muteOutput();
         return;
     }
@@ -146,6 +147,17 @@ void SenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     const float* inL = buffer.getReadPointer(0);
     const float* inR = buffer.getReadPointer(1);
     const int blockSamples = buffer.getNumSamples();
+    auto firstSamplePosition = somma::invalidSamplePosition;
+    if (const auto* playHead = getPlayHead())
+    {
+        if (const auto position = playHead->getPosition())
+        {
+            if (const auto hostSamplePosition = position->getTimeInSamples())
+                firstSamplePosition = *hostSamplePosition;
+        }
+    }
+    timelinePositionAvailable.store(somma::isValidSamplePosition(firstSamplePosition), std::memory_order_relaxed);
+
     for (int offset = 0; offset < blockSamples; offset += somma::maxSamplesPerPacket)
     {
         const int packetSamples = juce::jmin(somma::maxSamplesPerPacket, blockSamples - offset);
@@ -164,14 +176,22 @@ void SenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
         packet->header.sessionId = 1;
         packet->header.streamId = streamId;
         packet->header.blockIndex = packetBlockIndex;
+        packet->header.firstSamplePosition = firstSamplePosition;
+        if (somma::isValidSamplePosition(firstSamplePosition)
+            && !somma::addSampleFrames(firstSamplePosition, static_cast<uint32_t>(offset), packet->header.firstSamplePosition))
+        {
+            packet->header.firstSamplePosition = somma::invalidSamplePosition;
+        }
         packet->header.sampleRate = currentSampleRate;
         packet->header.numSamples = static_cast<uint16_t>(packetSamples);
         packet->header.pairIndex = static_cast<uint16_t>(pairIndex);
 
         for (int i = 0; i < packetSamples; ++i)
         {
-            packet->interleaved[static_cast<size_t>(i * 2)] = inL[offset + i] * gain;
-            packet->interleaved[static_cast<size_t>(i * 2 + 1)] = inR[offset + i] * gain;
+            const auto sourceLeft = inL[offset + i];
+            const auto sourceRight = inR[offset + i];
+            packet->interleaved[static_cast<size_t>(i * 2)] = gain == 1.0f ? sourceLeft : sourceLeft * gain;
+            packet->interleaved[static_cast<size_t>(i * 2 + 1)] = gain == 1.0f ? sourceRight : sourceRight * gain;
         }
 
         commitPacket();
@@ -245,6 +265,7 @@ SenderTransportStats SenderAudioProcessor::getTransportStats() const noexcept
         sendErrors.load(std::memory_order_relaxed),
         static_cast<uint16_t>(targetPort.load(std::memory_order_relaxed)),
         workerRunning.load(std::memory_order_acquire),
+        timelinePositionAvailable.load(std::memory_order_relaxed),
     };
 }
 

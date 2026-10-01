@@ -21,7 +21,7 @@ SenderAudioProcessorEditor::SenderAudioProcessorEditor(SenderAudioProcessor& p)
     gainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "preSendGainDb", gainSlider);
     bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.apvts, "bypassSend", bypassButton);
 
-    setSize(420, 200);
+    setSize(420, 214);
     startTimerHz(10);
 }
 
@@ -47,7 +47,7 @@ void SenderAudioProcessorEditor::resized()
     r.removeFromTop(4);
     bypassButton.setBounds(r.removeFromTop(24));
     r.removeFromTop(4);
-    statusLabel.setBounds(r.removeFromTop(38));
+    statusLabel.setBounds(r.removeFromTop(52));
 }
 
 void SenderAudioProcessorEditor::timerCallback()
@@ -56,7 +56,8 @@ void SenderAudioProcessorEditor::timerCallback()
     const auto worker = stats.workerRunning ? "running" : "stopped";
     statusLabel.setText("UDP " + juce::String(stats.targetPort)
                             + " | worker " + worker
-                            + " | queue " + juce::String(stats.queueDepth) + "/64 (peak " + juce::String(stats.queueHighWater) + ")\n"
+                            + " | DAW timeline " + (stats.timelinePositionAvailable ? "available" : "unavailable") + "\n"
+                            + "queue " + juce::String(stats.queueDepth) + "/64 (peak " + juce::String(stats.queueHighWater) + ")\n"
                             + "sent " + juce::String(stats.packetsSent)
                             + " | drops " + juce::String(stats.droppedPackets)
                             + " / " + juce::String(stats.droppedFrames) + " frames"

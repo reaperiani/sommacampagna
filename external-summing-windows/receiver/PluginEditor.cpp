@@ -45,10 +45,10 @@ void ReceiverAudioProcessorEditor::timerCallback()
     statusLabel.setText(stats.connected ? "Status: connected (main stereo sum)" : "Status: disconnected", juce::dontSendNotification);
     diagnosticsLabel.setText("Ring " + juce::String(stats.occupancyFrames) + "/" + juce::String(stats.targetFrames)
                                  + " fr | " + (stats.primed ? "primed" : "priming")
-                                 + " | clock " + juce::String(stats.clockCorrectionPpm) + " ppm\n"
                                  + "discontinuities/stale " + juce::String(stats.discontinuities) + "/" + juce::String(stats.stalePackets)
                                  + " | under/overflow " + juce::String(stats.underflows) + "/" + juce::String(stats.overflowPackets)
                                  + " | resync " + juce::String(stats.resyncs)
-                                 + " | invalid/rate " + juce::String(stats.invalidPackets) + "/" + juce::String(stats.wrongRatePackets),
+                                 + " | invalid/rate/untimed " + juce::String(stats.invalidPackets) + "/"
+                                 + juce::String(stats.wrongRatePackets) + "/" + juce::String(stats.untimedPackets),
                              juce::dontSendNotification);
 }

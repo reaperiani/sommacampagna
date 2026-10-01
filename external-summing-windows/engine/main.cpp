@@ -15,62 +15,34 @@ namespace
 constexpr int numPairs = 8;
 constexpr int numInputChannels = 16;
 constexpr uint16_t fixedEngineBlockSamples = 512;
-constexpr uint32_t streamTimeoutMs = 1200;
+constexpr uint32_t streamTimeoutMs = 300;
 constexpr size_t maxActiveStreams = 128;
 constexpr int maxReceiveDatagramsPerIteration = 1024;
 
 struct StreamState
 {
     bool active = false;
+    bool mustStartAtMixPosition = false;
     uint32_t streamId = 0;
     uint16_t pairIndex = 0;
-    uint16_t numSamples = 0;
     uint32_t sampleRate = 48000;
     uint32_t sessionId = 1;
     uint32_t lastSeenMs = 0;
-    std::array<float, somma::maxBufferedFrames> ringL {};
-    std::array<float, somma::maxBufferedFrames> ringR {};
-    size_t writePos = 0;
-    size_t readPos = 0;
-    size_t availableFrames = 0;
-    bool playbackPrimed = false;
+    somma::TimelineStereoBuffer audio;
     somma::BlockSequenceTracker sequence;
 
     void clearBuffer() noexcept
     {
-        writePos = 0;
-        readPos = 0;
-        availableFrames = 0;
-        playbackPrimed = false;
+        audio.clear();
     }
 
     void reset() noexcept
     {
         active = false;
         streamId = 0;
+        mustStartAtMixPosition = false;
         clearBuffer();
         sequence.reset();
-    }
-
-    void pushFrame(float l, float r) noexcept
-    {
-        ringL[writePos] = l;
-        ringR[writePos] = r;
-        writePos = (writePos + 1u) % somma::maxBufferedFrames;
-
-        ++availableFrames;
-    }
-
-    bool popFrame(float& l, float& r) noexcept
-    {
-        if (availableFrames == 0)
-            return false;
-
-        l = ringL[readPos];
-        r = ringR[readPos];
-        readPos = (readPos + 1u) % somma::maxBufferedFrames;
-        --availableFrames;
-        return true;
     }
 };
 
@@ -92,18 +64,17 @@ struct EngineSharedState
     std::atomic<uint32_t> primedStreams { 0 };
     std::atomic<uint32_t> receivedPackets { 0 };
     std::atomic<uint32_t> invalidPackets { 0 };
+    std::atomic<uint32_t> invalidTimelinePackets { 0 };
     std::atomic<uint32_t> rejectedPackets { 0 };
     std::atomic<uint32_t> sequenceResets { 0 };
+    std::atomic<uint32_t> timelineDiscontinuities { 0 };
     std::atomic<uint32_t> stalePackets { 0 };
-    std::atomic<uint32_t> overflowResets { 0 };
     std::atomic<uint32_t> underflows { 0 };
     std::atomic<uint32_t> backlogEvents { 0 };
     std::atomic<uint32_t> sendErrors { 0 };
-    std::atomic<uint32_t> lateSendCycles { 0 };
-    std::atomic<uint32_t> maxLateSendUs { 0 };
     std::atomic<uint32_t> averageOccupancyFrames { 0 };
     std::atomic<uint32_t> targetBufferFrames { 0 };
-    std::atomic<int32_t> clockCorrectionPpm { 0 };
+    std::atomic<int64_t> mixSamplePosition { somma::invalidSamplePosition };
     std::atomic<bool> configPublished { false };
 
     EngineSharedState()
@@ -121,6 +92,54 @@ size_t getTargetBufferFrames(float bufferMs, uint32_t sampleRate) noexcept
     const auto safeSampleRate = sampleRate > 0 ? sampleRate : 48000u;
     const auto frames = static_cast<size_t>((static_cast<double>(safeBufferMs) * static_cast<double>(safeSampleRate)) / 1000.0);
     return juce::jlimit(static_cast<size_t>(fixedEngineBlockSamples), somma::maxBufferedFrames - static_cast<size_t>(fixedEngineBlockSamples), frames);
+}
+
+bool canMixRange(const std::array<StreamState, maxActiveStreams>& streams,
+                 int64_t firstSamplePosition,
+                 uint32_t numSamples,
+                 uint32_t sessionId,
+                 uint32_t sampleRate) noexcept
+{
+    for (const auto& stream : streams)
+    {
+        if (!stream.active || stream.sessionId != sessionId || stream.sampleRate != sampleRate)
+            continue;
+
+        const auto streamStart = stream.audio.getFirstSamplePosition();
+        if (stream.mustStartAtMixPosition
+            && streamStart != somma::invalidSamplePosition
+            && streamStart > firstSamplePosition
+            && static_cast<uint64_t>(streamStart) - static_cast<uint64_t>(firstSamplePosition) > numSamples)
+        {
+            return false;
+        }
+
+        if (!stream.audio.canReadRange(firstSamplePosition, numSamples))
+            return false;
+    }
+
+    return true;
+}
+
+bool hasInputAtSamplePosition(const std::array<StreamState, maxActiveStreams>& streams,
+                              int64_t samplePosition,
+                              uint32_t sessionId,
+                              uint32_t sampleRate) noexcept
+{
+    for (const auto& stream : streams)
+    {
+        if (!stream.active || stream.sessionId != sessionId || stream.sampleRate != sampleRate)
+            continue;
+
+        if (stream.audio.getFirstSamplePosition() <= samplePosition
+            && stream.audio.getReadSamplePosition() <= samplePosition
+            && stream.audio.getWriteSamplePosition() > samplePosition)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 somma::UdpPorts makePublishedPorts(uint16_t inputPort, uint16_t outputPort, float totalBufferMs)
@@ -171,8 +190,7 @@ public:
         uint32_t outBlock = 0;
         uint32_t inputSessionId = 1;
         const auto outputSessionId = static_cast<uint32_t>(juce::Random::getSystemRandom().nextInt());
-        double clockCorrection = 0.0;
-        auto nextSend = juce::Time::getMillisecondCounterHiRes();
+        int64_t mixSamplePosition = somma::invalidSamplePosition;
         uint32_t lastConfigWriteMs = nowMs();
 
         while (!threadShouldExit())
@@ -198,6 +216,12 @@ public:
                     continue;
                 }
 
+                if (!somma::isValidSamplePosition(packet.header.firstSamplePosition))
+                {
+                    shared.invalidTimelinePackets.fetch_add(1u, std::memory_order_relaxed);
+                    continue;
+                }
+
                 if (sampleRateLocked && packet.header.sampleRate != sampleRate)
                 {
                     shared.rejectedPackets.fetch_add(1u, std::memory_order_relaxed);
@@ -210,8 +234,6 @@ public:
                     inputSessionId = packet.header.sessionId;
                     dsp.prepare(static_cast<double>(sampleRate));
                     sampleRateLocked = true;
-                    clockCorrection = 0.0;
-                    nextSend = juce::Time::getMillisecondCounterHiRes();
                 }
 
                 if (packet.header.sessionId != inputSessionId)
@@ -237,32 +259,57 @@ public:
                     continue;
                 }
 
-                if (sequenceStatus == somma::BlockSequenceStatus::forwardGap
-                    || sequenceStatus == somma::BlockSequenceStatus::restart)
+                if (sequenceStatus == somma::BlockSequenceStatus::forwardGap)
+                    shared.sequenceResets.fetch_add(1u, std::memory_order_relaxed);
+
+                const auto expectedSamplePosition = st.audio.getWriteSamplePosition();
+                const bool streamTimelineJump = sequenceStatus == somma::BlockSequenceStatus::restart
+                                             || (expectedSamplePosition != somma::invalidSamplePosition
+                                                 && ((sequenceStatus == somma::BlockSequenceStatus::inOrder
+                                                      && packet.header.firstSamplePosition != expectedSamplePosition)
+                                                     || (sequenceStatus == somma::BlockSequenceStatus::forwardGap
+                                                         && packet.header.firstSamplePosition < expectedSamplePosition)));
+                if (streamTimelineJump)
+                {
+                    for (auto& activeStream : streams)
+                    {
+                        if (activeStream.active)
+                        {
+                            activeStream.clearBuffer();
+                            activeStream.mustStartAtMixPosition = true;
+                        }
+                    }
+
+                    mixSamplePosition = packet.header.firstSamplePosition;
+                    shared.timelineDiscontinuities.fetch_add(1u, std::memory_order_relaxed);
+                }
+
+                if (st.audio.getAvailableFrames() > 0 && st.pairIndex != packet.header.pairIndex)
                 {
                     st.clearBuffer();
                     shared.sequenceResets.fetch_add(1u, std::memory_order_relaxed);
-                }
-
-                if (st.availableFrames > 0 && st.pairIndex != packet.header.pairIndex)
-                {
-                    st.clearBuffer();
-                    shared.sequenceResets.fetch_add(1u, std::memory_order_relaxed);
-                }
-
-                if (st.availableFrames + packet.header.numSamples > somma::maxBufferedFrames)
-                {
-                    st.clearBuffer();
-                    shared.overflowResets.fetch_add(1u, std::memory_order_relaxed);
                 }
 
                 st.pairIndex = packet.header.pairIndex;
-                st.numSamples = packet.header.numSamples;
                 st.sampleRate = packet.header.sampleRate;
                 st.sessionId = packet.header.sessionId;
                 st.lastSeenMs = nowMs();
-                for (int i = 0; i < static_cast<int>(packet.header.numSamples); ++i)
-                    st.pushFrame(packet.interleaved[static_cast<size_t>(i * 2)], packet.interleaved[static_cast<size_t>(i * 2 + 1)]);
+
+                bool timelineDiscontinuity = false;
+                if (!st.audio.append(packet.header.firstSamplePosition,
+                                     packet.interleaved.data(),
+                                     packet.header.numSamples,
+                                     timelineDiscontinuity))
+                {
+                    shared.invalidTimelinePackets.fetch_add(1u, std::memory_order_relaxed);
+                    continue;
+                }
+
+                if (timelineDiscontinuity)
+                    shared.timelineDiscontinuities.fetch_add(1u, std::memory_order_relaxed);
+
+                if (mixSamplePosition == somma::invalidSamplePosition)
+                    mixSamplePosition = packet.header.firstSamplePosition;
                 shared.receivedPackets.fetch_add(1u, std::memory_order_relaxed);
             }
 
@@ -272,22 +319,10 @@ public:
                 shared.backlogEvents.fetch_add(1u, std::memory_order_relaxed);
             }
 
-            params.consoleFlavor = shared.consoleFlavor.load(std::memory_order_relaxed);
-            params.compensatedDriveDb = shared.driveDb.load(std::memory_order_relaxed);
-            params.powerSupplyType = shared.powerSupplyType.load(std::memory_order_relaxed);
-            params.masterOutputDb = shared.outputDb.load(std::memory_order_relaxed);
-            params.gravityPct = shared.gravityPct.load(std::memory_order_relaxed);
-            params.bypass = shared.bypass.load(std::memory_order_relaxed);
-
-            for (auto& channel : mixInputs)
-                channel.fill(0.0f);
-
             const uint32_t t = nowMs();
             const auto targetBufferFrames = getTargetBufferFrames(somma::getEngineTransmissionBufferMs(appliedTotalBufferMs), sampleRate);
             shared.targetBufferFrames.store(static_cast<uint32_t>(targetBufferFrames), std::memory_order_relaxed);
             size_t activeStreamCount = 0;
-            size_t primedStreamCount = 0;
-            double primedOccupancyFrames = 0.0;
             for (auto& st : streams)
             {
                 if (!st.active)
@@ -300,42 +335,7 @@ public:
                 }
 
                 ++activeStreamCount;
-                if (st.sessionId == inputSessionId)
-                {
-                    const int base = st.pairIndex * 2;
-                    if (!st.playbackPrimed && st.availableFrames >= targetBufferFrames)
-                        st.playbackPrimed = true;
-
-                    if (st.playbackPrimed && st.availableFrames < fixedEngineBlockSamples)
-                    {
-                        st.playbackPrimed = false;
-                        shared.underflows.fetch_add(1u, std::memory_order_relaxed);
-                    }
-
-                    if (st.playbackPrimed)
-                    {
-                        primedOccupancyFrames += static_cast<double>(st.availableFrames);
-                        ++primedStreamCount;
-                        for (int i = 0; i < fixedEngineBlockSamples; ++i)
-                        {
-                            float l = 0.0f;
-                            float r = 0.0f;
-                            if (!st.popFrame(l, r))
-                            {
-                                st.playbackPrimed = false;
-                                shared.underflows.fetch_add(1u, std::memory_order_relaxed);
-                                break;
-                            }
-
-                            mixInputs[(size_t) base][(size_t) i] += l;
-                            mixInputs[(size_t) base + 1][(size_t) i] += r;
-                        }
-                    }
-                }
             }
-
-            shared.activeStreams.store(static_cast<uint32_t>(activeStreamCount), std::memory_order_relaxed);
-            shared.primedStreams.store(static_cast<uint32_t>(primedStreamCount), std::memory_order_relaxed);
 
             const auto requestedTotalBufferMs = somma::sanitizeTotalTransmissionBufferMs(shared.requestedTotalBufferMs.load(std::memory_order_relaxed));
             const bool bufferChangePending = requestedTotalBufferMs != appliedTotalBufferMs;
@@ -361,36 +361,98 @@ public:
             if (activeStreamCount == 0)
             {
                 sampleRateLocked = false;
-                clockCorrection = 0.0;
-            }
-            else if (primedStreamCount > 0)
-            {
-                const auto averageOccupancy = primedOccupancyFrames / static_cast<double>(primedStreamCount);
-                const auto occupancyError = averageOccupancy - static_cast<double>(targetBufferFrames);
-                const auto correctionTarget = somma::getClockCorrectionTarget(occupancyError);
-                clockCorrection = somma::smoothClockCorrection(clockCorrection,
-                                                               correctionTarget,
-                                                               fixedEngineBlockSamples,
-                                                               sampleRate);
-            }
-            else
-            {
-                clockCorrection = 0.0;
+                mixSamplePosition = somma::invalidSamplePosition;
             }
 
-            shared.averageOccupancyFrames.store(primedStreamCount > 0
-                                                     ? static_cast<uint32_t>(primedOccupancyFrames / static_cast<double>(primedStreamCount))
+            size_t readyStreamCount = 0;
+            double totalOccupancy = 0.0;
+            for (const auto& st : streams)
+            {
+                if (!st.active || st.sessionId != inputSessionId || st.sampleRate != sampleRate)
+                    continue;
+
+                totalOccupancy += static_cast<double>(st.audio.getAvailableFrames());
+                if (mixSamplePosition != somma::invalidSamplePosition
+                    && st.audio.canReadRange(mixSamplePosition, fixedEngineBlockSamples))
+                {
+                    ++readyStreamCount;
+                }
+            }
+
+            shared.activeStreams.store(static_cast<uint32_t>(activeStreamCount), std::memory_order_relaxed);
+            shared.primedStreams.store(static_cast<uint32_t>(readyStreamCount), std::memory_order_relaxed);
+            shared.averageOccupancyFrames.store(activeStreamCount > 0
+                                                     ? static_cast<uint32_t>(totalOccupancy / static_cast<double>(activeStreamCount))
                                                      : 0u,
                                                  std::memory_order_relaxed);
-            shared.clockCorrectionPpm.store(static_cast<int32_t>(std::lround(clockCorrection * 1000000.0)), std::memory_order_relaxed);
+            shared.mixSamplePosition.store(mixSamplePosition, std::memory_order_relaxed);
+
+            int64_t rangeEnd = 0;
+            const auto requiredFrames = static_cast<uint32_t>(targetBufferFrames + fixedEngineBlockSamples);
+            const bool rangeValid = somma::addSampleFrames(mixSamplePosition, requiredFrames, rangeEnd);
+            const bool canProcessBlock = activeStreamCount > 0
+                                      && sampleRateLocked
+                                      && rangeValid
+                                      && hasInputAtSamplePosition(streams, mixSamplePosition, inputSessionId, sampleRate)
+                                      && canMixRange(streams,
+                                                     mixSamplePosition,
+                                                     requiredFrames,
+                                                     inputSessionId,
+                                                     sampleRate);
+
+            if (!canProcessBlock)
+            {
+                juce::Thread::sleep(1);
+                continue;
+            }
+
+            params.consoleFlavor = shared.consoleFlavor.load(std::memory_order_relaxed);
+            params.compensatedDriveDb = shared.driveDb.load(std::memory_order_relaxed);
+            params.powerSupplyType = shared.powerSupplyType.load(std::memory_order_relaxed);
+            params.masterOutputDb = shared.outputDb.load(std::memory_order_relaxed);
+            params.gravityPct = shared.gravityPct.load(std::memory_order_relaxed);
+            params.bypass = shared.bypass.load(std::memory_order_relaxed);
+
+            for (auto& channel : mixInputs)
+                channel.fill(0.0f);
+
+            for (auto& st : streams)
+            {
+                if (!st.active || st.sessionId != inputSessionId || st.sampleRate != sampleRate)
+                    continue;
+
+                const int base = st.pairIndex * 2;
+                for (uint32_t i = 0; i < fixedEngineBlockSamples; ++i)
+                {
+                    const auto framePosition = mixSamplePosition + static_cast<int64_t>(i);
+                    float left = 0.0f;
+                    float right = 0.0f;
+                    const auto result = st.audio.readAt(framePosition, left, right);
+                    if (result == somma::TimelineStereoBuffer::ReadResult::available)
+                    {
+                        mixInputs[static_cast<size_t>(base)][i] += left;
+                        mixInputs[static_cast<size_t>(base + 1)][i] += right;
+                    }
+                    else if (result == somma::TimelineStereoBuffer::ReadResult::unavailable)
+                    {
+                        shared.underflows.fetch_add(1u, std::memory_order_relaxed);
+                    }
+                }
+
+                if (st.mustStartAtMixPosition
+                    && st.audio.getFirstSamplePosition() <= mixSamplePosition)
+                {
+                    st.mustStartAtMixPosition = false;
+                }
+            }
 
             for (int ch = 0; ch < numInputChannels; ++ch)
             {
-                mixPtrs[(size_t) ch] = mixInputs[(size_t) ch].data();
+                mixPtrs[static_cast<size_t>(ch)] = mixInputs[static_cast<size_t>(ch)].data();
                 float peak = 0.0f;
-                for (int n = 0; n < fixedEngineBlockSamples; ++n)
-                    peak = juce::jmax(peak, std::abs(mixInputs[(size_t) ch][(size_t) n]));
-                shared.inputMetersDb[(size_t) ch].store(juce::Decibels::gainToDecibels(peak, -100.0f), std::memory_order_relaxed);
+                for (uint32_t n = 0; n < fixedEngineBlockSamples; ++n)
+                    peak = juce::jmax(peak, std::abs(mixInputs[static_cast<size_t>(ch)][n]));
+                shared.inputMetersDb[static_cast<size_t>(ch)].store(juce::Decibels::gainToDecibels(peak, -100.0f), std::memory_order_relaxed);
             }
 
             dsp.process(mixPtrs.data(), outL.data(), outR.data(), fixedEngineBlockSamples, params);
@@ -401,36 +463,22 @@ public:
             outPacket.header.packetType = static_cast<uint16_t>(somma::PacketType::mainStereoSum);
             outPacket.header.sessionId = outputSessionId;
             outPacket.header.blockIndex = outBlock++;
+            outPacket.header.firstSamplePosition = mixSamplePosition;
             outPacket.header.sampleRate = sampleRate;
             outPacket.header.numSamples = fixedEngineBlockSamples;
 
-            for (int i = 0; i < fixedEngineBlockSamples; ++i)
+            for (uint32_t i = 0; i < fixedEngineBlockSamples; ++i)
             {
-                outPacket.interleaved[(size_t) (i * 2)] = outL[(size_t) i];
-                outPacket.interleaved[(size_t) (i * 2 + 1)] = outR[(size_t) i];
+                outPacket.interleaved[static_cast<size_t>(i * 2u)] = outL[i];
+                outPacket.interleaved[static_cast<size_t>(i * 2u + 1u)] = outR[i];
             }
 
-            const int bytesToSend = static_cast<int>(sizeof(somma::PacketHeader) + static_cast<size_t>(fixedEngineBlockSamples * 2) * sizeof(float));
+            const int bytesToSend = static_cast<int>(somma::getStereoAudioPacketSize(fixedEngineBlockSamples));
             if (outSocket.write("127.0.0.1", static_cast<int>(selectedOutPort), reinterpret_cast<const char*>(&outPacket), bytesToSend) != bytesToSend)
                 shared.sendErrors.fetch_add(1u, std::memory_order_relaxed);
 
-            const double blockMs = (static_cast<double>(fixedEngineBlockSamples) / static_cast<double>(sampleRate)) * 1000.0;
-            // Positive occupancy error speeds consumption: T = Tnominal / (1 + correction).
-            nextSend += blockMs / (1.0 + clockCorrection);
-            const double waitMs = nextSend - juce::Time::getMillisecondCounterHiRes();
-            if (waitMs > 0.0)
-                juce::Thread::sleep(static_cast<int>(waitMs));
-            else
-            {
-                const auto lateUs = static_cast<uint32_t>(juce::jmin(4294967295.0, -waitMs * 1000.0));
-                shared.lateSendCycles.fetch_add(1u, std::memory_order_relaxed);
-                auto maxLateUs = shared.maxLateSendUs.load(std::memory_order_relaxed);
-                while (lateUs > maxLateUs
-                       && !shared.maxLateSendUs.compare_exchange_weak(maxLateUs, lateUs, std::memory_order_relaxed))
-                {
-                }
-                nextSend = juce::Time::getMillisecondCounterHiRes();
-            }
+            mixSamplePosition += fixedEngineBlockSamples;
+            shared.mixSamplePosition.store(mixSamplePosition, std::memory_order_relaxed);
         }
     }
 
@@ -615,20 +663,19 @@ private:
                                     + " active / " + juce::String(shared.primedStreams.load(std::memory_order_relaxed)) + " primed"
                                     + " | ring " + juce::String(shared.averageOccupancyFrames.load(std::memory_order_relaxed)) + "/"
                                     + juce::String(shared.targetBufferFrames.load(std::memory_order_relaxed)) + " fr"
-                                    + " | clock " + juce::String(shared.clockCorrectionPpm.load(std::memory_order_relaxed)) + " ppm\n"
+                                    + " | mix frame " + juce::String(shared.mixSamplePosition.load(std::memory_order_relaxed)) + "\n"
                                     + "Rx " + juce::String(shared.receivedPackets.load(std::memory_order_relaxed))
-                                    + " | invalid/rejected " + juce::String(shared.invalidPackets.load(std::memory_order_relaxed)) + "/"
+                                    + " | invalid/untimed/rejected " + juce::String(shared.invalidPackets.load(std::memory_order_relaxed)) + "/"
+                                    + juce::String(shared.invalidTimelinePackets.load(std::memory_order_relaxed)) + "/"
                                     + juce::String(shared.rejectedPackets.load(std::memory_order_relaxed))
                                     + " | seq/stale " + juce::String(shared.sequenceResets.load(std::memory_order_relaxed)) + "/"
                                     + juce::String(shared.stalePackets.load(std::memory_order_relaxed))
-                                    + " | under/overflow " + juce::String(shared.underflows.load(std::memory_order_relaxed)) + "/"
-                                    + juce::String(shared.overflowResets.load(std::memory_order_relaxed))
+                                    + " | timeline/underflow " + juce::String(shared.timelineDiscontinuities.load(std::memory_order_relaxed)) + "/"
+                                    + juce::String(shared.underflows.load(std::memory_order_relaxed))
                                     + " | backlog/send errors " + juce::String(shared.backlogEvents.load(std::memory_order_relaxed)) + "/"
                                     + juce::String(shared.sendErrors.load(std::memory_order_relaxed))
-                                    + " | late " + juce::String(shared.lateSendCycles.load(std::memory_order_relaxed))
-                                    + " (max " + juce::String(shared.maxLateSendUs.load(std::memory_order_relaxed)) + " us)"
                                     + (shared.configPublished.load(std::memory_order_relaxed) ? " | config OK" : " | config ERROR"),
-                                juce::dontSendNotification);
+                                 juce::dontSendNotification);
         repaint();
     }
 

@@ -18,9 +18,12 @@ This is a new, isolated project folder that leaves the original multichannel VST
 ## Important MVP notes
 
 - Transport is localhost UDP only (`127.0.0.1`).
+- Audio is uncompressed float32 PCM tagged with the DAW sample position; no codec or rate conversion is used.
 - The engine accumulates concurrent sender streams into eight stereo pairs and processes their sum.
+- All sender pairs are mixed against one common sample-frame cursor. A DAW host that does not provide sample positions is not supported for synchronized mixing.
 - Sender and receiver networking runs on dedicated worker threads.
 - The total buffer target is split between the engine and receiver; changes apply after sender streams stop.
+- Buffers add latency only; a clock correction never accelerates or slows the audio.
 - Real-time playback is supported; faster-than-real-time/offline bounce is not guaranteed.
 
 ## Ports

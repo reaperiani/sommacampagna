@@ -1,5 +1,7 @@
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 
@@ -74,11 +76,12 @@ void testSequenceTracking()
     expect(tracker.observe(0) == somma::BlockSequenceStatus::inOrder, "sequence wraps naturally");
 }
 
-void testProtocolAndClockCorrection()
+void testProtocolAndTimeline()
 {
     somma::StereoAudioPacket packet;
     packet.header.packetType = static_cast<uint16_t>(somma::PacketType::senderAudio);
     packet.header.numSamples = 1;
+    packet.header.firstSamplePosition = 8192;
     packet.header.sampleRate = 48000;
     packet.interleaved[0] = 0.25f;
     packet.interleaved[1] = -0.25f;
@@ -89,6 +92,9 @@ void testProtocolAndClockCorrection()
                                           somma::PacketType::senderAudio,
                                           decoded),
            "valid packet decodes");
+    expect(decoded.header.firstSamplePosition == 8192, "sample timeline position survives packet decode");
+    expect(std::memcmp(decoded.interleaved.data(), packet.interleaved.data(), 2u * sizeof(float)) == 0,
+           "PCM payload survives packet decode bit-for-bit");
 
     packet.interleaved[0] = std::numeric_limits<float>::infinity();
     expect(!somma::decodeStereoAudioPacket(&packet,
@@ -97,11 +103,89 @@ void testProtocolAndClockCorrection()
                                            decoded),
            "non-finite payload is rejected");
 
-    expect(somma::getClockCorrectionTarget(16.0) == 0.0, "clock deadband includes boundary");
-    expect(somma::getClockCorrectionTarget(100000.0) == somma::maxClockCorrectionRatio,
-           "positive clock correction is capped");
-    expect(somma::getClockCorrectionTarget(-100000.0) == -somma::maxClockCorrectionRatio,
-           "negative clock correction is capped");
+    int64_t nextPosition = 0;
+    expect(somma::addSampleFrames(8192, 512, nextPosition) && nextPosition == 8704,
+           "sample frame ranges advance by their exact frame count");
+    expect(!somma::addSampleFrames(somma::invalidSamplePosition, 1, nextPosition),
+           "missing host timeline positions are rejected");
+    expect(!somma::addSampleFrames(std::numeric_limits<int64_t>::max(), 1, nextPosition),
+           "sample timeline overflow is rejected");
+}
+
+void testTimelineStereoBufferAlignment()
+{
+    static somma::TimelineStereoBuffer sender12;
+    static somma::TimelineStereoBuffer sender34;
+    sender12.clear();
+    sender34.clear();
+
+    const float sender12Samples[] { 0.1f, -0.1f, 0.2f, -0.2f, 0.3f, -0.3f, 0.4f, -0.4f };
+    const float sender34Samples[] { 1.3f, -1.3f, 1.4f, -1.4f };
+    bool discontinuity = false;
+    expect(sender12.append(100, sender12Samples, 4, discontinuity) && !discontinuity,
+           "first sender block is stored at its DAW frame position");
+    expect(sender34.append(102, sender34Samples, 2, discontinuity) && !discontinuity,
+           "second sender block may arrive at a later DAW frame position");
+    expect(sender12.canReadRange(100, 4) && sender34.canReadRange(100, 4),
+           "buffers can provide one common frame range despite different starts");
+
+    const float expected12[] { 0.1f, -0.1f, 0.2f, -0.2f, 0.3f, -0.3f, 0.4f, -0.4f };
+    const float expected34[] { 0.0f, 0.0f, 0.0f, 0.0f, 1.3f, -1.3f, 1.4f, -1.4f };
+    float rendered12[8] {};
+    float rendered34[8] {};
+    for (int64_t frame = 100; frame < 104; ++frame)
+    {
+        float left = 0.0f;
+        float right = 0.0f;
+        expect(sender12.readAt(frame, left, right) == somma::TimelineStereoBuffer::ReadResult::available,
+               "first sender is read at the requested shared frame index");
+        rendered12[static_cast<size_t>(frame - 100) * 2u] = left;
+        rendered12[static_cast<size_t>(frame - 100) * 2u + 1u] = right;
+
+        const auto result = sender34.readAt(frame, left, right);
+        expect(result == (frame < 102 ? somma::TimelineStereoBuffer::ReadResult::beforeStream
+                                     : somma::TimelineStereoBuffer::ReadResult::available),
+               "second sender is silent before its own aligned start frame");
+        rendered34[static_cast<size_t>(frame - 100) * 2u] = left;
+        rendered34[static_cast<size_t>(frame - 100) * 2u + 1u] = right;
+    }
+
+    expect(std::memcmp(rendered12, expected12, sizeof(expected12)) == 0,
+           "first sender frames are read without interpolation or value changes");
+    expect(std::memcmp(rendered34, expected34, sizeof(expected34)) == 0,
+           "second sender aligns to the same DAW frame timeline without shifting");
+
+    static somma::TimelineStereoBuffer bitExactBuffer;
+    bitExactBuffer.clear();
+    const std::array<float, 4> specialFloatSamples {
+        -0.0f,
+        std::numeric_limits<float>::denorm_min(),
+        0.25f,
+        -0.75f,
+    };
+    expect(bitExactBuffer.append(200, specialFloatSamples.data(), 2, discontinuity),
+           "special PCM float values enter the frame buffer");
+    std::array<float, 4> copiedSpecialFloatSamples {};
+    for (int64_t frame = 200; frame < 202; ++frame)
+    {
+        float left = 0.0f;
+        float right = 0.0f;
+        expect(bitExactBuffer.readAt(frame, left, right) == somma::TimelineStereoBuffer::ReadResult::available,
+               "special PCM float frame is available exactly once");
+        copiedSpecialFloatSamples[static_cast<size_t>(frame - 200) * 2u] = left;
+        copiedSpecialFloatSamples[static_cast<size_t>(frame - 200) * 2u + 1u] = right;
+    }
+    expect(std::memcmp(copiedSpecialFloatSamples.data(), specialFloatSamples.data(), sizeof(specialFloatSamples)) == 0,
+           "unity transport preserves signed zero and subnormal PCM bit patterns");
+
+    const float gapSample[] { 0.5f, -0.5f };
+    expect(sender12.append(105, gapSample, 1, discontinuity), "forward sample gaps are represented in the timeline buffer");
+    expect(sender12.readAt(104, rendered12[0], rendered12[1]) == somma::TimelineStereoBuffer::ReadResult::available
+               && rendered12[0] == 0.0f && rendered12[1] == 0.0f,
+           "missing input frames become silence at their original positions");
+    expect(sender12.readAt(105, rendered12[0], rendered12[1]) == somma::TimelineStereoBuffer::ReadResult::available
+               && rendered12[0] == gapSample[0] && rendered12[1] == gapSample[1],
+           "later frames are not shifted to close a missing-frame gap");
 }
 }
 
@@ -110,7 +194,8 @@ int main()
     testBufferPolicy();
     testPortParsing();
     testSequenceTracking();
-    testProtocolAndClockCorrection();
+    testProtocolAndTimeline();
+    testTimelineStereoBufferAlignment();
 
     if (failures != 0)
     {

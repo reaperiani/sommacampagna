@@ -29,6 +29,8 @@ public:
         uint32_t sessionId = 0;
         bool haveSession = false;
         bool haveBufferConfig = false;
+        bool haveSamplePosition = false;
+        int64_t expectedSamplePosition = somma::invalidSamplePosition;
         somma::BlockSequenceTracker sequence;
         std::array<char, somma::maximumInspectedDatagramSize> datagram;
         somma::StereoAudioPacket packet;
@@ -54,6 +56,8 @@ public:
                         receivePort = config.engineToReceiver;
                         sequence.reset();
                         haveSession = false;
+                        haveSamplePosition = false;
+                        expectedSamplePosition = somma::invalidSamplePosition;
                         if (replacingSocket)
                         {
                             processor.resyncRequested.store(true, std::memory_order_release);
@@ -92,6 +96,7 @@ public:
                             processor.discontinuities.fetch_add(1u, std::memory_order_relaxed);
                             processor.resyncRequested.store(true, std::memory_order_release);
                             sequence.reset();
+                            haveSamplePosition = false;
                         }
 
                         sessionId = packet.header.sessionId;
@@ -112,10 +117,39 @@ public:
 
                         if (acceptPacket)
                         {
-                            processor.pushPacket(packet);
-                            processor.lastBlockReceived.store(packet.header.blockIndex, std::memory_order_release);
-                            processor.lastReceiveTimeMs.store(now, std::memory_order_release);
-                            processor.connected.store(true, std::memory_order_release);
+                            if (!somma::isValidSamplePosition(packet.header.firstSamplePosition))
+                            {
+                                processor.untimedPackets.fetch_add(1u, std::memory_order_relaxed);
+                                acceptPacket = false;
+                            }
+                        }
+
+                        if (acceptPacket)
+                        {
+                            int64_t packetEndPosition = 0;
+                            if (haveSamplePosition
+                                && packet.header.firstSamplePosition != expectedSamplePosition)
+                            {
+                                processor.discontinuities.fetch_add(1u, std::memory_order_relaxed);
+                                processor.resyncRequested.store(true, std::memory_order_release);
+                            }
+
+                            if (!somma::addSampleFrames(packet.header.firstSamplePosition,
+                                                        packet.header.numSamples,
+                                                        packetEndPosition))
+                            {
+                                processor.untimedPackets.fetch_add(1u, std::memory_order_relaxed);
+                                acceptPacket = false;
+                            }
+                            else
+                            {
+                                processor.pushPacket(packet);
+                                expectedSamplePosition = packetEndPosition;
+                                haveSamplePosition = true;
+                                processor.lastBlockReceived.store(packet.header.blockIndex, std::memory_order_release);
+                                processor.lastReceiveTimeMs.store(now, std::memory_order_release);
+                                processor.connected.store(true, std::memory_order_release);
+                            }
                         }
                     }
                     ++packetsRead;
@@ -134,6 +168,8 @@ public:
                     processor.resyncRequested.store(true, std::memory_order_release);
                     sequence.reset();
                     haveSession = false;
+                    haveSamplePosition = false;
+                    expectedSamplePosition = somma::invalidSamplePosition;
                 }
             }
         }
@@ -167,10 +203,6 @@ void ReceiverAudioProcessor::prepareToPlay(double sampleRate, int)
                                  ? static_cast<uint32_t>(std::lround(sampleRate))
                                  : 0u;
     currentSampleRate = somma::isSupportedSampleRate(roundedSampleRate) ? roundedSampleRate : 48000u;
-    fractionalReadPhase = 0.0;
-    clockCorrection = 0.0;
-    lastOutL = 0.0f;
-    lastOutR = 0.0f;
     lastBlockReceived.store(0, std::memory_order_relaxed);
     lastReceiveTimeMs.store(0, std::memory_order_relaxed);
     connected.store(false, std::memory_order_relaxed);
@@ -178,7 +210,6 @@ void ReceiverAudioProcessor::prepareToPlay(double sampleRate, int)
     primedSnapshot.store(false, std::memory_order_relaxed);
     occupancyFramesSnapshot.store(0, std::memory_order_relaxed);
     targetFramesSnapshot.store(0, std::memory_order_relaxed);
-    clockCorrectionPpmSnapshot.store(0, std::memory_order_relaxed);
     discontinuities.store(0, std::memory_order_relaxed);
     stalePackets.store(0, std::memory_order_relaxed);
     overflowPackets.store(0, std::memory_order_relaxed);
@@ -187,6 +218,7 @@ void ReceiverAudioProcessor::prepareToPlay(double sampleRate, int)
     resyncs.store(0, std::memory_order_relaxed);
     invalidPackets.store(0, std::memory_order_relaxed);
     wrongRatePackets.store(0, std::memory_order_relaxed);
+    untimedPackets.store(0, std::memory_order_relaxed);
     startNetworkThread();
 }
 
@@ -196,8 +228,6 @@ void ReceiverAudioProcessor::releaseResources()
     writePosition.store(0, std::memory_order_relaxed);
     readPosition.store(0, std::memory_order_relaxed);
     playbackPrimed = false;
-    fractionalReadPhase = 0.0;
-    clockCorrection = 0.0;
     connected.store(false, std::memory_order_relaxed);
     resyncRequested.store(false, std::memory_order_relaxed);
 }
@@ -210,7 +240,6 @@ bool ReceiverAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) 
 
 void ReceiverAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
-    juce::ScopedNoDenormals noDenormals;
     const int numSamples = buffer.getNumSamples();
 
     buffer.clear();
@@ -230,50 +259,23 @@ void ReceiverAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         read = write;
         availableFrames = 0;
         playbackPrimed = false;
-        fractionalReadPhase = 0.0;
-        clockCorrection = 0.0;
     }
 
-    const auto minimumPrimingFrames = juce::jmax(targetBufferFrames, static_cast<size_t>(2));
+    const auto minimumPrimingFrames = juce::jmax(targetBufferFrames, static_cast<size_t>(1));
     if (isConnected && !playbackPrimed && availableFrames >= minimumPrimingFrames)
-    {
         playbackPrimed = true;
-        fractionalReadPhase = 0.0;
-        clockCorrection = 0.0;
-    }
 
-    if (isConnected && playbackPrimed)
-    {
-        const auto occupancy = static_cast<double>(availableFrames) - fractionalReadPhase;
-        const auto occupancyError = occupancy - static_cast<double>(targetBufferFrames);
-        const auto correctionTarget = somma::getClockCorrectionTarget(occupancyError);
-        clockCorrection = somma::smoothClockCorrection(clockCorrection,
-                                                       correctionTarget,
-                                                       static_cast<uint32_t>(juce::jmax(0, numSamples)),
-                                                       currentSampleRate);
-    }
-
-    const auto sourceStep = 1.0 + clockCorrection;
     for (int i = 0; i < numSamples; ++i)
     {
-        float l = 0.0f;
-        float r = 0.0f;
-
-        if (isConnected && playbackPrimed && availableFrames >= 2u)
+        if (isConnected && playbackPrimed && availableFrames > 0u)
         {
             const auto ringIndex = static_cast<size_t>(read % static_cast<uint32_t>(ringFrames));
-            const auto nextRingIndex = static_cast<size_t>((read + 1u) % static_cast<uint32_t>(ringFrames));
-            const auto phase = static_cast<float>(fractionalReadPhase);
-            l = ringL[ringIndex] + phase * (ringL[nextRingIndex] - ringL[ringIndex]);
-            r = ringR[ringIndex] + phase * (ringR[nextRingIndex] - ringR[ringIndex]);
-
-            fractionalReadPhase += sourceStep;
-            const auto consumedFrames = static_cast<uint32_t>(fractionalReadPhase);
-            fractionalReadPhase -= static_cast<double>(consumedFrames);
-            read += consumedFrames;
-            availableFrames -= consumedFrames;
-            lastOutL = l;
-            lastOutR = r;
+            const auto sourceLeft = ringL[ringIndex];
+            const auto sourceRight = ringR[ringIndex];
+            outL[i] = trim == 1.0f ? sourceLeft : sourceLeft * trim;
+            outR[i] = trim == 1.0f ? sourceRight : sourceRight * trim;
+            ++read;
+            --availableFrames;
         }
         else
         {
@@ -282,26 +284,17 @@ void ReceiverAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
                 read = write;
                 availableFrames = 0;
                 playbackPrimed = false;
-                fractionalReadPhase = 0.0;
-                clockCorrection = 0.0;
                 underflows.fetch_add(1u, std::memory_order_relaxed);
             }
-
-            lastOutL *= 0.985f;
-            lastOutR *= 0.985f;
-            l = lastOutL;
-            r = lastOutR;
+            outL[i] = 0.0f;
+            outR[i] = 0.0f;
         }
-
-        outL[i] = l * trim;
-        outR[i] = r * trim;
     }
 
     readPosition.store(read, std::memory_order_release);
     primedSnapshot.store(playbackPrimed, std::memory_order_relaxed);
     occupancyFramesSnapshot.store(availableFrames, std::memory_order_relaxed);
     targetFramesSnapshot.store(static_cast<uint32_t>(targetBufferFrames), std::memory_order_relaxed);
-    clockCorrectionPpmSnapshot.store(static_cast<int32_t>(std::lround(clockCorrection * 1000000.0)), std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* ReceiverAudioProcessor::createEditor()
@@ -361,7 +354,6 @@ ReceiverTransportStats ReceiverAudioProcessor::getTransportStats() const noexcep
         primedSnapshot.load(std::memory_order_relaxed),
         occupancyFramesSnapshot.load(std::memory_order_relaxed),
         targetFramesSnapshot.load(std::memory_order_relaxed),
-        clockCorrectionPpmSnapshot.load(std::memory_order_relaxed),
         discontinuities.load(std::memory_order_relaxed),
         stalePackets.load(std::memory_order_relaxed),
         overflowPackets.load(std::memory_order_relaxed),
@@ -370,6 +362,7 @@ ReceiverTransportStats ReceiverAudioProcessor::getTransportStats() const noexcep
         resyncs.load(std::memory_order_relaxed),
         invalidPackets.load(std::memory_order_relaxed),
         wrongRatePackets.load(std::memory_order_relaxed),
+        untimedPackets.load(std::memory_order_relaxed),
     };
 }
 

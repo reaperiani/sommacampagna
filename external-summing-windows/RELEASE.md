@@ -21,7 +21,8 @@ Re-running a tagged workflow may replace assets only while the release remains a
 - Sign the macOS app and plugins with Developer ID, notarize the distributed archive, and validate it with Gatekeeper.
 - Verify the Windows binaries are x64 and every macOS executable contains both `arm64` and `x86_64` slices.
 - Run VST3/plugin validation and `auval` for both products.
-- Test sender-to-engine-to-receiver audio at 44.1, 48, 96, and 192 kHz with common DAW buffer sizes.
+- Test sender-to-engine-to-receiver audio at 44.1, 48, 96, and 192 kHz with common DAW buffer sizes; verify impulses from every sender pair remain on the same sample index over long playback, seeks, and loops.
+- Confirm each supported DAW supplies a valid playhead sample position; verify untimed hosts fail visibly rather than mixing unsynchronized audio.
 - Test installation and removal on clean Windows 10/11, Intel macOS 12+, and Apple Silicon macOS systems.
 - Verify the downloaded ZIP files against `SHA256SUMS.txt`.
 

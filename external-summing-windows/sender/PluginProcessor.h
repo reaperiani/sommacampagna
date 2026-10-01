@@ -18,6 +18,7 @@ struct SenderTransportStats
     uint32_t sendErrors = 0;
     uint16_t targetPort = somma::senderToEnginePort;
     bool workerRunning = false;
+    bool timelinePositionAvailable = false;
 };
 
 class SenderAudioProcessor final : public juce::AudioProcessor
@@ -76,6 +77,7 @@ private:
     std::atomic<uint32_t> sendErrors { 0 };
     std::atomic<uint32_t> targetPort { somma::senderToEnginePort };
     std::atomic<bool> workerRunning { false };
+    std::atomic<bool> timelinePositionAvailable { false };
     std::unique_ptr<SenderNetworkThread> networkThread;
     uint32_t streamId = 0;
     uint32_t blockIndex = 0;
